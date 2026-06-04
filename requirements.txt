@@ -4,4 +4,3 @@ streamlit-folium
 matplotlib
 pandas
 streamlit-autorefresh
-coord-convert
