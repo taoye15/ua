@@ -530,8 +530,9 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
 #---------------------------------------------------------------------
 
 def init():
-    DEFAULT_A_GCJ = [118.746426, 32.232384]
-    DEFAULT_B_GCJ = [118.750966, 32.236290]
+    # 修改默认起点和终点坐标为截图中的值
+    DEFAULT_A_GCJ = [118.753501, 32.231118]
+    DEFAULT_B_GCJ = [118.754725, 32.234240]
 
     defaults = {
         'page': '航线规划',
