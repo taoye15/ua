@@ -117,7 +117,7 @@ def save_obstacles(obstacles):
         'obstacles': obstacles,
         'count': len(obstacles),
         'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'version': 'v17.0_obstacle_avoidance_improved',
+        'version': 'v19.0_balanced_obstacle_avoidance',
         'coord_sys': 'GCJ-02'
     }
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -193,7 +193,6 @@ def line_intersects_polygon(p1, p2, polygon):
 def get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False):
     blocking = []
     for obs in obstacles:
-        # 只有当障碍物高度 > 飞行高度时才阻挡，或者忽略高度检查
         if ignore_alt or obs.get('height', 30) > flight_alt:
             coords = obs.get('polygon', [])
             if coords and line_intersects_polygon(start, end, coords):
@@ -207,7 +206,7 @@ def meters_to_deg(meters, lat=32.23):
 
 #
 #---------------------------------------------------------------------
-# 改进的绕行算法 - 紧贴障碍物绕行
+# 改进的绕行算法 - 平衡距离绕行（不贴太近也不离太远）
 #---------------------------------------------------------------------
 
 def get_polygon_edges(polygon):
@@ -225,8 +224,6 @@ def find_line_polygon_intersections(p1, p2, polygon):
     for edge in edges:
         e1, e2 = edge
         if segments_intersect(p1, p2, e1, e2):
-            # 计算交点坐标
-            # 使用参数方程求解
             x1, y1 = p1
             x2, y2 = p2
             x3, y3 = e1
@@ -240,7 +237,6 @@ def find_line_polygon_intersections(p1, p2, polygon):
             if 0 <= t <= 1:
                 ix = x1 + t * (x2 - x1)
                 iy = y1 + t * (y2 - y1)
-                # 检查交点是否在多边形边上（避免重复）
                 if point_on_segment([ix, iy], e1, e2):
                     intersections.append([ix, iy])
     
@@ -253,7 +249,6 @@ def get_nearest_point_on_polygon(point, polygon):
     edges = get_polygon_edges(polygon)
     for edge in edges:
         e1, e2 = edge
-        # 计算点到线段的最短距离
         dx = e2[0] - e1[0]
         dy = e2[1] - e1[1]
         if dx == 0 and dy == 0:
@@ -274,9 +269,50 @@ def get_nearest_point_on_polygon(point, polygon):
     
     return nearest, min_dist
 
-def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radius=2):
+def get_polygon_centroid(polygon):
+    """计算多边形中心"""
+    center_lng = sum(p[0] for p in polygon) / len(polygon)
+    center_lat = sum(p[1] for p in polygon) / len(polygon)
+    return [center_lng, center_lat]
+
+def get_polygon_bounding_box(polygon):
+    """获取多边形包围盒"""
+    min_lng = min(p[0] for p in polygon)
+    max_lng = max(p[0] for p in polygon)
+    min_lat = min(p[1] for p in polygon)
+    max_lat = max(p[1] for p in polygon)
+    return min_lng, max_lng, min_lat, max_lat
+
+def compute_balanced_offset_distance(safety_radius, polygon):
     """
-    创建紧贴障碍物的绕行路径
+    计算平衡的偏移距离
+    根据障碍物大小动态调整偏移量，避免太贴或太远
+    """
+    # 基础偏移 = 安全半径 * 1.2 ~ 1.8 倍，根据障碍物大小调整
+    min_lng, max_lng, min_lat, max_lat = get_polygon_bounding_box(polygon)
+    width = max_lng - min_lng
+    height = max_lat - min_lat
+    size = max(width, height)
+    
+    # 如果障碍物较小，使用较大的偏移系数；如果较大，使用较小的偏移系数
+    if size < 0.0001:  # 约10米
+        scale_factor = 1.8
+    elif size < 0.0005:  # 约50米
+        scale_factor = 1.5
+    else:
+        scale_factor = 1.2
+    
+    # 最终偏移距离 = 安全半径 * scale_factor
+    # 但至少保证有安全半径 * 1.0 的距离
+    offset = safety_radius * max(1.0, scale_factor)
+    return offset
+
+def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radius=2, direction="最佳航线"):
+    """
+    创建平衡距离的绕行路径
+    支持方向：最佳航线、向左绕行、向右绕行
+    向左绕行：沿多边形顺时针方向走
+    向右绕行：沿多边形逆时针方向走
     返回绕行路径点列表
     """
     polygon = obstacle.get('polygon', [])
@@ -288,14 +324,12 @@ def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radi
     end_inside = point_in_polygon(end, polygon)
     
     if start_inside and end_inside:
-        # 都在内部，无法绕行，返回直线
         return [start, end]
     
     # 找到航线与多边形的交点
     intersections = find_line_polygon_intersections(start, end, polygon)
     
     if len(intersections) < 2:
-        # 没有两个交点，尝试用其他方法
         return [start, end]
     
     # 按距离起点排序交点
@@ -305,38 +339,12 @@ def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radi
     entry_point = intersections[0]
     exit_point = intersections[-1]
     
-    # 计算绕行方向：选择障碍物的一侧绕行
-    # 计算多边形中心
-    center_lng = sum(p[0] for p in polygon) / len(polygon)
-    center_lat = sum(p[1] for p in polygon) / len(polygon)
-    center = [center_lng, center_lat]
+    # 计算多边形中心和包围盒
+    center = get_polygon_centroid(polygon)
     
-    # 计算航线方向向量
-    dir_vec = [end[0] - start[0], end[1] - start[1]]
-    dir_len = math.hypot(dir_vec[0], dir_vec[1])
-    if dir_len < 1e-10:
-        return [start, end]
-    dir_vec = [dir_vec[0]/dir_len, dir_vec[1]/dir_len]
-    
-    # 计算法向量（垂直于航线方向）
-    normal_vec = [-dir_vec[1], dir_vec[0]]
-    
-    # 判断障碍物在航线的哪一侧（相对于中线）
-    mid_point = [(entry_point[0] + exit_point[0])/2, (entry_point[1] + exit_point[1])/2]
-    to_center = [center[0] - mid_point[0], center[1] - mid_point[1]]
-    side = to_center[0] * normal_vec[0] + to_center[1] * normal_vec[1]
-    
-    # 选择绕行方向：绕过障碍物的外侧
-    # 在进入点和离开点附近找到多边形上的最近点作为绕行参考
-    ref_point, _ = get_nearest_point_on_polygon(mid_point, polygon)
-    if ref_point is None:
-        return [start, end]
-    
-    # 安全距离（转换为度）
-    safety_lng, safety_lat = meters_to_deg(safety_radius)
-    
-    # 生成绕行路径：沿着多边形边界走
-    waypoints = [start]
+    # 计算平衡的偏移距离
+    balanced_offset = compute_balanced_offset_distance(safety_radius, polygon)
+    offset_lng, offset_lat = meters_to_deg(balanced_offset)
     
     # 在进入点附近找到多边形上的点
     entry_on_poly, _ = get_nearest_point_on_polygon(entry_point, polygon)
@@ -345,10 +353,10 @@ def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radi
     if entry_on_poly is None or exit_on_poly is None:
         return [start, end]
     
-    # 获取多边形顶点列表，用于沿边界走
+    # 获取多边形顶点列表
     vertices = polygon[:]
     
-    # 找到入口点和出口点在多边形上的位置（最近顶点）
+    # 找到入口点和出口点在多边形上的位置（最近顶点索引）
     entry_idx = 0
     exit_idx = 0
     min_entry_dist = float('inf')
@@ -364,45 +372,49 @@ def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radi
             min_exit_dist = d_exit
             exit_idx = i
     
-    # 决定沿多边形走的方向（顺时针或逆时针）
-    # 选择路径较短的方向
     n = len(vertices)
     
-    # 顺时针路径
-    cw_path = []
+    # 顺时针路径（向右绕行）
+    clockwise_path = []
     i = entry_idx
     while True:
-        cw_path.append(vertices[i][:])
+        clockwise_path.append(vertices[i][:])
         if i == exit_idx:
             break
         i = (i + 1) % n
-        if i == entry_idx:  # 绕了一圈
+        if i == entry_idx:
             break
     
-    # 逆时针路径
-    ccw_path = []
+    # 逆时针路径（向左绕行）
+    counterclockwise_path = []
     i = entry_idx
     while True:
-        ccw_path.append(vertices[i][:])
+        counterclockwise_path.append(vertices[i][:])
         if i == exit_idx:
             break
         i = (i - 1) % n
-        if i == entry_idx:  # 绕了一圈
+        if i == entry_idx:
             break
     
-    # 选择较短的路径
-    cw_len = sum(distance(cw_path[j], cw_path[j+1]) for j in range(len(cw_path)-1))
-    ccw_len = sum(distance(ccw_path[j], ccw_path[j+1]) for j in range(len(ccw_path)-1))
+    # 计算两条路径的长度
+    cw_len = sum(distance(clockwise_path[j], clockwise_path[j+1]) for j in range(len(clockwise_path)-1))
+    ccw_len = sum(distance(counterclockwise_path[j], counterclockwise_path[j+1]) for j in range(len(counterclockwise_path)-1))
     
-    if cw_len <= ccw_len:
-        boundary_path = cw_path
+    # 根据绕行方向选择路径
+    if direction == "向左绕行":
+        boundary_path = clockwise_path
+    elif direction == "向右绕行":
+        boundary_path = counterclockwise_path
     else:
-        boundary_path = ccw_path
+        # 最佳航线：选择较短路径
+        if cw_len <= ccw_len:
+            boundary_path = clockwise_path
+        else:
+            boundary_path = counterclockwise_path
     
-    # 将边界路径向外偏移（安全距离）
+    # 将边界路径向外偏移（平衡距离）
     offset_path = []
     for i, p in enumerate(boundary_path):
-        # 计算该点的外法线方向
         prev_idx = (i - 1) % len(boundary_path)
         next_idx = (i + 1) % len(boundary_path)
         
@@ -415,6 +427,7 @@ def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radi
         if tan_len < 1e-10:
             offset_path.append(p[:])
             continue
+        
         tan_vec = [tan_vec[0]/tan_len, tan_vec[1]/tan_len]
         
         # 法线方向（指向外侧）
@@ -425,48 +438,74 @@ def create_obstacle_avoidance_path(start, end, obstacle, flight_alt, safety_radi
         if normal[0] * to_center_vec[0] + normal[1] * to_center_vec[1] > 0:
             normal = [-normal[0], -normal[1]]
         
-        # 向外偏移
+        # 向外偏移（使用平衡距离）
         offset_p = [
-            p[0] + normal[0] * safety_lng,
-            p[1] + normal[1] * safety_lat
+            p[0] + normal[0] * offset_lng,
+            p[1] + normal[1] * offset_lat
         ]
         offset_path.append(offset_p)
+    
+    # 对偏移路径进行平滑处理（在转折点处添加过渡点）
+    if len(offset_path) > 3:
+        smoothed_path = []
+        for i in range(len(offset_path) - 1):
+            current = offset_path[i]
+            next_p = offset_path[i + 1]
+            smoothed_path.append(current)
+            # 在相邻点之间添加插值点，使路径更平滑
+            for t in [0.25, 0.5, 0.75]:
+                mid_x = current[0] + (next_p[0] - current[0]) * t
+                mid_y = current[1] + (next_p[1] - current[1]) * t
+                # 检查插值点是否在障碍物内部
+                if not point_in_polygon([mid_x, mid_y], polygon):
+                    smoothed_path.append([mid_x, mid_y])
+        smoothed_path.append(offset_path[-1])
+        offset_path = smoothed_path
     
     # 构建完整路径
     full_path = [start]
     full_path.extend(offset_path)
     full_path.append(end)
     
+    # 最后检查路径是否会穿过障碍物，如果会则进行微调
+    for i in range(len(full_path) - 1):
+        if line_intersects_polygon(full_path[i], full_path[i+1], polygon):
+            # 如果某段穿越障碍物，在中间插入一个绕行点
+            mid = [(full_path[i][0] + full_path[i+1][0]) / 2,
+                   (full_path[i][1] + full_path[i+1][1]) / 2]
+            # 将中点向外偏移
+            to_center = [center[0] - mid[0], center[1] - mid[1]]
+            dist_to_center = math.hypot(to_center[0], to_center[1])
+            if dist_to_center > 0:
+                # 向外移动
+                mid[0] += to_center[0] / dist_to_center * offset_lng
+                mid[1] += to_center[1] / dist_to_center * offset_lat
+            full_path.insert(i + 1, mid)
+            break
+    
     return full_path
 
 def create_avoidance_path_with_multiple_obstacles(start, end, obstacles, flight_alt, direction, safety_radius=5):
     """
     处理多个障碍物的绕行
-    使用递归方法，依次绕过每个障碍物
     """
-    # 检查是否有任何障碍物阻挡
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False)
     
     if not blocking:
         return [start, end]
     
-    # 选择阻挡路径上第一个障碍物来处理
-    # 按距离起点排序
     blocking.sort(key=lambda obs: distance(start, obs.get('polygon', [])[0] if obs.get('polygon') else [0,0]))
     
     current_path = [start]
     current_pos = start
     
     for obs in blocking:
-        # 检查从当前位置到终点的路径是否被该障碍物阻挡
         if line_intersects_polygon(current_pos, end, obs.get('polygon', [])):
-            # 创建绕行路径
             bypass_path = create_obstacle_avoidance_path(
-                current_pos, end, obs, flight_alt, safety_radius
+                current_pos, end, obs, flight_alt, safety_radius, direction
             )
-            # 合并路径（去除重复点）
+            
             if len(bypass_path) > 1:
-                # 保留当前位置，添加后续路径（跳过第一个点，因为与current_pos重复）
                 current_path.extend(bypass_path[1:])
                 current_pos = bypass_path[-1]
             else:
@@ -492,90 +531,15 @@ def is_path_clear(p1, p2, obstacles, flight_alt, ignore_alt=False):
     blocking = get_blocking_obstacles(p1, p2, obstacles, flight_alt, ignore_alt)
     return len(blocking) == 0
 
-def find_avoidance_point(start, end, obstacles, flight_alt, direction, safety_radius=5):
-    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=True)
-    if not blocking:
-        return None, []
-
-    min_lng, max_lng, min_lat, max_lat = compute_blocked_bounds(blocking)
-    safe_lat = meters_to_deg(safety_radius * 3)[1]
-    safe_lng = meters_to_deg(safety_radius * 3)[0]
-
-    if direction == "向左绕行":
-        lat_offset = max_lat + safe_lat
-        lng_mid = (start[0] + end[0]) / 2
-        waypoint = [lng_mid, lat_offset]
-    elif direction == "向右绕行":
-        lat_offset = min_lat - safe_lat
-        lng_mid = (start[0] + end[0]) / 2
-        waypoint = [lng_mid, lat_offset]
-    else:
-        # 最佳航线：使用改进的绕行算法
-        return None, blocking
-
-    max_attempts = 10
-    for _ in range(max_attempts):
-        collide = False
-        for obs in blocking:
-            if point_in_polygon(waypoint, obs['polygon']):
-                collide = True
-                if direction == "向左绕行":
-                    waypoint[1] += safe_lat
-                else:
-                    waypoint[1] -= safe_lat
-                break
-        if not collide:
-            break
-    return waypoint, blocking
-
-def plan_recursive_path(start, end, obstacles, flight_alt, direction, safety_radius=5, depth=0):
-    if depth > 10:
-        return [start, end]
-    
-    # 首先尝试使用改进的绕行算法
-    if direction == "最佳航线":
-        path = create_avoidance_path_with_multiple_obstacles(
-            start, end, obstacles, flight_alt, direction, safety_radius
-        )
-        return path
-    
-    # 传统绕行方式
-    if is_path_clear(start, end, obstacles, flight_alt, ignore_alt=True):
-        return [start, end]
-
-    waypoint, _ = find_avoidance_point(start, end, obstacles, flight_alt, direction, safety_radius)
-    if waypoint is None:
-        return [start, end]
-
-    path1 = plan_recursive_path(start, waypoint, obstacles, flight_alt, direction, safety_radius, depth+1)
-    path2 = plan_recursive_path(waypoint, end, obstacles, flight_alt, direction, safety_radius, depth+1)
-    full_path = path1[:-1] + path2
-    return full_path
-
-def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
-    return plan_recursive_path(start, end, obstacles, flight_alt, "向左绕行", safety_radius)
-
-def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
-    return plan_recursive_path(start, end, obstacles, flight_alt, "向右绕行", safety_radius)
-
-def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
-    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False)
-    if not blocking:
-        return [start, end]
-
-    # 使用改进的绕行算法
+def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_radius=5):
+    """
+    统一的航线规划入口
+    所有方向都使用平衡距离的绕行算法
+    """
     path = create_avoidance_path_with_multiple_obstacles(
-        start, end, obstacles, flight_alt, "最佳航线", safety_radius
+        start, end, obstacles, flight_alt, direction, safety_radius
     )
     return path
-
-def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_radius=5):
-    if direction == "向左绕行":
-        return find_left_path(start, end, obstacles, flight_alt, safety_radius)
-    elif direction == "向右绕行":
-        return find_right_path(start, end, obstacles, flight_alt, safety_radius)
-    else:
-        return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
 #
 #---------------------------------------------------------------------
@@ -751,54 +715,44 @@ def add_comm_log(message, direction="OBC内部"):
 
 #
 #---------------------------------------------------------------------
-# 地图创建（关键修改：所有显示坐标 GCJ-02 -> WGS-84）
+# 地图创建
 #---------------------------------------------------------------------
 
 def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt, enable_draw=False):
-    # 地图中心点：GCJ-02 -> WGS-84
     center_wgs = gcj02_to_wgs84(center_gcj[0], center_gcj[1])
     m = folium.Map(location=[center_wgs[1], center_wgs[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
 
-    # 障碍物多边形：顶点从 GCJ-02 转为 WGS-84
     for obs in obstacles:
         coords_gcj = obs.get('polygon', [])
         height = obs.get('height', 30)
         if coords_gcj and len(coords_gcj) >= 3:
             coords_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in coords_gcj]
-            # 根据障碍物高度与飞行高度比较，决定颜色
-            # 如果障碍物高度 > 飞行高度，显示为红色（需要绕行），否则为橙色（可以飞越）
             color = "red" if height > flight_alt else "orange"
             folium.Polygon([[c[1], c[0]] for c in coords_wgs], color=color, weight=2,
                            fill=True, fill_color=color, fill_opacity=0.4,
                            popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m\n状态:{'⚠️ 需绕行' if height > flight_alt else '✅ 可飞越'}").add_to(m)
 
-    # 起点 A
     if points_gcj.get('A'):
         a_wgs = gcj02_to_wgs84(points_gcj['A'][0], points_gcj['A'][1])
         folium.Marker([a_wgs[1], a_wgs[0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
 
-    # 终点 B
     if points_gcj.get('B'):
         b_wgs = gcj02_to_wgs84(points_gcj['B'][0], points_gcj['B'][1])
         folium.Marker([b_wgs[1], b_wgs[0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
 
-    # 规划路径
     if plan_path and len(plan_path) > 1:
         path_wgs = [gcj02_to_wgs84(p[0], p[1]) for p in plan_path]
         folium.PolyLine([[p[1], p[0]] for p in path_wgs], color='green', weight=4,
                         popup=f"航线长度: {path_length(plan_path)*111000:.1f}m").add_to(m)
 
-    # 历史轨迹
     if flight_trail:
         trail_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in flight_trail[-100:]]
         folium.PolyLine([[lat, lng] for lng, lat in trail_wgs], color='orange', weight=2).add_to(m)
 
-    # 无人机当前位置
     if drone_pos_gcj:
         drone_wgs = gcj02_to_wgs84(drone_pos_gcj[0], drone_pos_gcj[1])
         folium.Marker([drone_wgs[1], drone_wgs[0]], icon=folium.Icon(color='blue')).add_to(m)
 
-    # 绘图工具（不需要坐标转换，其返回坐标已经是 WGS-84）
     if enable_draw:
         draw = Draw(
             draw_options={
@@ -822,7 +776,6 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
 #---------------------------------------------------------------------
 
 def init():
-    # 修改默认起点和终点坐标为截图中的值
     DEFAULT_A_GCJ = [118.753501, 32.231118]
     DEFAULT_B_GCJ = [118.754725, 32.234240]
 
@@ -859,7 +812,7 @@ def init():
 
 def update_plan_and_waypoints():
     if st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
-        add_comm_log("开始航线规划 - 算法: A* 改进版", "OBC内部")
+        add_comm_log("开始航线规划 - 算法: 平衡距离绕行", "OBC内部")
         path = create_avoidance_path(
             st.session_state.points_gcj['A'],
             st.session_state.points_gcj['B'],
@@ -931,7 +884,7 @@ def main():
 
             st.markdown("---")
             st.subheader("🤖 避障策略")
-            st.info("💡 **最佳航线**：自动紧贴障碍物边缘绕行，路径最短且不穿过障碍物")
+            st.info("💡 **平衡绕行**：路径与障碍物保持合理距离\n- 不会太贴近障碍物（保证安全）\n- 不会太远离障碍物（缩短航程）\n- 完全不穿过障碍物")
             direction = st.radio("绕行方向", ["最佳航线", "向左绕行", "向右绕行"],
                                 index=["最佳航线", "向左绕行", "向右绕行"].index(st.session_state.avoid_direction))
             if direction != st.session_state.avoid_direction:
@@ -1036,7 +989,7 @@ def main():
     # ==================== 障碍物管理页面 ====================
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
-        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v17.0_obstacle_avoidance_improved")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v19.0_balanced_obstacle_avoidance")
         st.info("📂 所有障碍物坐标均以 GCJ-02 存储，与高德底图完全对齐。")
 
         col1, col2, col3, col4 = st.columns(4)
@@ -1141,7 +1094,7 @@ def main():
     elif st.session_state.page == "航线规划":
         st.header("🗺️ 航线规划 - 点击地图 + 方向微调 + 手动输入坐标 + 多边形圈选障碍物")
         st.info("🔧 **坐标修正说明**：绘制多边形时，系统会自动将 WGS-84 坐标转换为 GCJ-02 存储，确保与高德底图完全对齐，圈选不再偏移。")
-        st.info("🛡️ **避障增强**：当障碍物高度 > 飞行高度时，航线会自动紧贴障碍物边缘绕行，完全不穿过障碍物。")
+        st.info("🛡️ **平衡绕行**：路径与障碍物保持合理距离，既不会太贴也不会太远，完全不穿过障碍物。")
 
         col_map, col_panel = st.columns([3, 1.2])
 
@@ -1283,13 +1236,12 @@ def main():
 
             map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
 
-            # 处理绘制多边形（转换 WGS-84 -> GCJ-02 存储）
+            # 处理绘制多边形
             if st.session_state.draw_enabled and not st.session_state.flight_started and map_output:
                 last_draw = map_output.get("last_active_drawing")
                 if last_draw and last_draw.get("geometry", {}).get("type") == "Polygon":
                     coords_wgs = last_draw["geometry"]["coordinates"][0]
                     vertices_wgs = [[c[0], c[1]] for c in coords_wgs]
-                    # 存储时转换为 GCJ-02
                     vertices_gcj = [list(wgs84_to_gcj02(lng, lat)) for lng, lat in vertices_wgs]
                     st.session_state.drawn_polygon = vertices_gcj
                     st.session_state.show_add_dialog = True
@@ -1327,7 +1279,7 @@ def main():
                             st.session_state.drawn_polygon = None
                             st.rerun()
 
-            # 处理点击地图移动航点（点击位置是 WGS-84，转换为 GCJ-02 存储）
+            # 处理点击地图移动航点
             if (not st.session_state.draw_enabled) and (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
                 lat_click = map_output["last_clicked"]["lat"]
                 lng_click = map_output["last_clicked"]["lng"]
@@ -1463,7 +1415,6 @@ def main():
             a = st.session_state.points_gcj['A']
             b = st.session_state.points_gcj['B']
 
-            # 飞行监控地图同样需要将 GCJ-02 转为 WGS-84 显示
             center_wgs = gcj02_to_wgs84(center[0], center[1])
             m = folium.Map(location=[center_wgs[1], center_wgs[0]], zoom_start=18, tiles=GAODE_TILE, attr='高德')
 
