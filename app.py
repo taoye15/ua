@@ -15,7 +15,7 @@ from folium.plugins import Draw
 # ------------------------------------------------------------
 # 配置
 # ------------------------------------------------------------
-SCHOOL_CENTER_GCJ = [118.749413, 32.234097]       # 学校中心点(GCJ-02)
+SCHOOL_CENTER_GCJ = [118.749428, 32.234111]       # 学校中心点(GCJ-02)
 GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
 HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED = 5.0
