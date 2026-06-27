@@ -16,11 +16,44 @@ from folium.plugins import Draw
 # 配置
 # ----------------------------------------------------------------------
 SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 学校中心点(GCJ-02)
-GAODE_TILE = "https://webst01.is.autonavis.com/appmaptile?style=6&x={x}&y={y}&z={z}"
+
+# 高德地图瓦片URL - 使用标准高德地图瓦片（无需密钥）
+# 注意：高德地图瓦片服务可能有访问限制，如果无法显示，请尝试以下备选方案
+GAODE_TILE = "https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
+
+# 备选高德地图瓦片URL（如果上面不行，试试这个）
+# GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
+
+# 备选：OpenStreetMap（不需要密钥，稳定可靠）
+# GAODE_TILE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+# 备选：CartoDB地图
+# GAODE_TILE = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+
 HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED = 5.0
 HOVER_SECONDS = 5
 CONFIG_FILE = "obstacle_config.json"
+
+
+# ----------------------------------------------------------------------
+# 地图创建函数 - 支持多种瓦片源
+# ----------------------------------------------------------------------
+def create_folium_map(center_gcj, zoom_start=16, tiles=GAODE_TILE, attr='高德地图'):
+    """
+    创建Folium地图，支持高德地图瓦片
+    """
+    center_wgs = gcj02_to_wgs84(center_gcj[0], center_gcj[1])
+    
+    # 使用高德地图瓦片
+    m = folium.Map(
+        location=[center_wgs[1], center_wgs[0]], 
+        zoom_start=zoom_start, 
+        tiles=tiles,
+        attr=attr
+    )
+    return m
+
 
 # ----------------------------------------------------------------------
 # MAVLink 消息解析器（模拟 + 接口预留）
@@ -624,8 +657,17 @@ def add_comm_log(message, direction="OBC内部"):
 # 地图创建（关键修改：所有显示坐标 GCJ-02 -> WGS-84）
 # ----------------------------------------------------------------------
 def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt, enable_draw=False):
+    """创建航线规划地图 - 使用高德地图瓦片"""
     center_wgs = gcj02_to_wgs84(center_gcj[0], center_gcj[1])
-    m = folium.Map(location=[center_wgs[1], center_wgs[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
+    
+    # 使用高德地图瓦片（带风格参数）
+    m = folium.Map(
+        location=[center_wgs[1], center_wgs[0]], 
+        zoom_start=16, 
+        tiles=GAODE_TILE,
+        attr='高德地图'
+    )
+    
     for obs in obstacles:
         coords_gcj = obs.get('polygon', [])
         height = obs.get('height', 30)
@@ -860,7 +902,6 @@ def main():
                         st.session_state.flight_started = True
                         st.session_state.flight_paused = False
                         st.session_state.last_arrival_msg = ""
-                        # 初始化MAVLink数据
                         st.session_state.mavlink_messages = []
                         st.session_state.mavlink_latest = {}
                         st.success("飞行已开始，切换至「飞行监控」查看动态")
@@ -1052,6 +1093,17 @@ def main():
         st.header("🗺️ 航线规划 - 点击地图 + 方向微调 + 手动输入坐标 + 多边形圈选障碍物")
         st.info("🔧 **坐标修正说明**：绘制多边形时，系统会自动将 WGS-84 坐标转换为 GCJ-02 存储，确保与高德底图完全对齐，圈选不再偏移。")
         
+        # 添加地图瓦片切换选项
+        with st.expander("🌐 地图设置", expanded=False):
+            tile_options = {
+                "高德地图（标准）": "https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
+                "高德地图（卫星）": "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}",
+                "OpenStreetMap": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                "CartoDB浅色": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+            }
+            selected_tile = st.selectbox("选择地图瓦片", list(tile_options.keys()), index=0)
+            st.session_state.tile_url = tile_options[selected_tile]
+        
         col_map, col_panel = st.columns([3, 1.2])
         
         with col_panel:
@@ -1167,6 +1219,9 @@ def main():
             if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.latest_hb:
                 drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
             
+            # 使用选中的瓦片URL
+            tile_url = st.session_state.get('tile_url', GAODE_TILE)
+            
             folium_map = create_planning_map(
                 SCHOOL_CENTER_GCJ,
                 st.session_state.points_gcj,
@@ -1177,6 +1232,11 @@ def main():
                 st.session_state.flight_alt,
                 enable_draw=st.session_state.draw_enabled and not st.session_state.flight_started
             )
+            
+            # 如果使用高德地图，需要添加额外的配置
+            if "高德" in tile_url or "autonavi" in tile_url:
+                # 高德地图可能需要跨域设置
+                pass
             
             map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
             
@@ -1256,7 +1316,6 @@ def main():
                 else:
                     break
             
-            # 更新MAVLink模拟数据
             if st.session_state.mavlink_data_source == "模拟数据":
                 update_mavlink_sim_data()
         
@@ -1303,7 +1362,6 @@ def main():
         st.markdown("---")
         st.subheader("📡 MAVLink 消息监视器 (Inspector)")
         
-        # 数据源状态显示
         col_src, col_msg_count = st.columns(2)
         with col_src:
             st.markdown(f"**当前数据源**: {st.session_state.mavlink_data_source}")
@@ -1320,7 +1378,6 @@ def main():
             for msg_type, count in msg_counts.items():
                 st.caption(f"- {msg_type}: {count}条")
         
-        # MAVLink 消息表
         st.markdown("#### 支持的 MAVLink 消息类型")
         mavlink_types = [
             {"名称": "HEARTBEAT", "值": 0, "描述": "系统心跳状态"},
@@ -1331,11 +1388,9 @@ def main():
         ]
         st.dataframe(pd.DataFrame(mavlink_types), use_container_width=True, hide_index=True)
         
-        # 最新消息显示 - 类似 QGC MAVLink Inspector
         st.markdown("#### 最新 MAVLink 消息")
         
         if st.session_state.mavlink_latest:
-            # 创建5列显示不同类型的消息
             cols = st.columns(5)
             msg_display_order = ["HEARTBEAT", "STATUS", "GLOBAL_POSITION_INT", "ATTITUDE", "VFR_HUD"]
             
@@ -1354,11 +1409,9 @@ def main():
                     else:
                         st.caption("等待数据...")
         
-        # 消息历史表格
         with st.expander("📜 消息历史记录", expanded=False):
             if st.session_state.mavlink_messages:
                 df = pd.DataFrame(st.session_state.mavlink_messages[:20])
-                # 选择显示的列
                 display_cols = ["type", "timestamp"]
                 for col in ["system_status", "mode", "voltage", "remaining", "lat", "lng", "alt", 
                            "roll", "pitch", "yaw", "airspeed", "groundspeed", "heading", "throttle"]:
@@ -1371,7 +1424,6 @@ def main():
         
         st.markdown("---")
         
-        # 原有飞行监控内容
         col_left, col_right = st.columns([1, 1.5])
         
         with col_left:
@@ -1424,7 +1476,8 @@ def main():
             b = st.session_state.points_gcj['B']
             
             center_wgs = gcj02_to_wgs84(center[0], center[1])
-            m = folium.Map(location=[center_wgs[1], center_wgs[0]], zoom_start=18, tiles=GAODE_TILE, attr='高德')
+            tile_url = st.session_state.get('tile_url', GAODE_TILE)
+            m = folium.Map(location=[center_wgs[1], center_wgs[0]], zoom_start=18, tiles=tile_url, attr='高德地图')
             
             for obs in st.session_state.obstacles:
                 coords_gcj = obs.get('polygon', [])
