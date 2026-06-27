@@ -23,59 +23,21 @@ HOVER_SECONDS = 5
 CONFIG_FILE = "obstacle_config.json"
 
 #-------------------------------------------------------------------------------
-# MAVLink消息解析类（新增）
+# MAVLink消息解析类
 #-------------------------------------------------------------------------------
-class MAVLinkMessage:
-    """MAVLink消息解析器 - 模拟MAVLink协议消息解析"""
+class MAVLinkParser:
+    """MAVLink消息解析器"""
     
-    # MAVLink消息ID定义
-    MSG_ID_HEARTBEAT = 0
-    MSG_ID_SYS_STATUS = 1
-    MSG_ID_GLOBAL_POSITION_INT = 33
-    MSG_ID_ATTITUDE = 30
-    MSG_ID_VFR_HUD = 74
-    MSG_ID_MISSION_CURRENT = 43
-    MSG_ID_MISSION_ITEM_REACHED = 46
-    MSG_ID_STATUSTEXT = 253
-    
-    # 系统状态
-    MAV_STATE_UNINIT = 0
-    MAV_STATE_BOOT = 1
-    MAV_STATE_CALIBRATING = 2
-    MAV_STATE_STANDBY = 3
-    MAV_STATE_ACTIVE = 4
-    MAV_STATE_CRITICAL = 5
-    MAV_STATE_EMERGENCY = 6
-    MAV_STATE_POWEROFF = 7
-    MAV_STATE_FLIGHT_TERMINATION = 8
-    
-    MAV_STATE_NAMES = {
-        0: "未初始化",
-        1: "启动中",
-        2: "校准中",
-        3: "待机",
-        4: "激活",
-        5: "严重警告",
-        6: "紧急状态",
-        7: "关机",
-        8: "飞行终止"
-    }
-    
-    # 飞行模式
-    MODE_NAMES = {
-        0: "手动",
-        1: "增稳",
-        2: "定高",
-        3: "悬停",
-        4: "自主",
-        5: "任务",
-        6: "返航",
-        7: "降落",
-        8: "跟随",
-        9: "特技",
-        10: "方位",
-        11: "起飞",
-        12: "着陆"
+    # MAVLink消息类型定义
+    MESSAGE_TYPES = {
+        0: {"name": "HEARTBEAT", "description": "系统心跳状态"},
+        1: {"name": "SYS_STATUS", "description": "电池状态"},
+        33: {"name": "GLOBAL_POSITION_INT", "description": "全球定位信息"},
+        30: {"name": "ATTITUDE", "description": "姿态信息"},
+        74: {"name": "VFR_HUD", "description": "飞行状态数据"},
+        253: {"name": "STATUSTEXT", "description": "状态文本信息"},
+        43: {"name": "MISSION_CURRENT", "description": "当前任务序号"},
+        46: {"name": "MISSION_ITEM_REACHED", "description": "任务点到达"}
     }
     
     def __init__(self):
@@ -85,65 +47,45 @@ class MAVLinkMessage:
         """重置解析器状态"""
         self.last_message = None
         self.message_history = []
+        self.parsed_count = 0
         self.system_status = {
             "connected": False,
-            "sysid": 1,
-            "compid": 1,
-            "state": self.MAV_STATE_STANDBY,
-            "mode": 4,  # 自主模式
-            "armed": False,
-            "battery_voltage": 12.6,
-            "battery_remaining": 85,
-            "gps_fix": 3,
-            "satellites": 12,
-            "roll": 0.0,
-            "pitch": 0.0,
-            "yaw": 0.0,
+            "data_source": "模拟数据",
+            "interface_status": "已连接",
+            "mode": "Simulation Mode",
+            "battery": 85,
             "altitude": 0.0,
-            "relative_alt": 0.0,
             "ground_speed": 0.0,
-            "air_speed": 0.0,
-            "climb_rate": 0.0,
-            "heading": 0,
-            "mission_current": 0,
-            "mission_count": 0,
-            "text_messages": []
+            "satellites": 12,
+            "gps_fix": 3
         }
-        self.parsed_messages = []
     
     def parse_message(self, raw_data):
-        """
-        解析原始MAVLink消息
-        模拟输入格式: "MSG_ID|payload_field1=value1,field2=value2,..."
-        或标准MAVLink十六进制格式
-        """
+        """解析MAVLink消息"""
         try:
             if isinstance(raw_data, str):
                 raw_data = raw_data.strip()
                 
                 # 检测消息格式
-                if raw_data.startswith("MSG_ID"):
-                    return self._parse_simulated_message(raw_data)
+                if raw_data.startswith("MSG_ID") or "|" in raw_data:
+                    return self._parse_simulated(raw_data)
                 elif raw_data.startswith("FE") or all(c in "0123456789ABCDEF" for c in raw_data.replace(" ", "").upper()):
-                    return self._parse_hex_message(raw_data)
+                    return self._parse_hex(raw_data)
                 else:
-                    # 尝试解析为JSON格式
                     try:
                         data = json.loads(raw_data)
-                        return self._parse_json_message(data)
+                        return self._parse_json(data)
                     except:
-                        return self._parse_text_message(raw_data)
+                        return self._parse_text(raw_data)
             elif isinstance(raw_data, dict):
-                return self._parse_json_message(raw_data)
-            else:
-                return None
+                return self._parse_json(raw_data)
+            return None
         except Exception as e:
             return {"error": f"解析失败: {str(e)}"}
     
-    def _parse_simulated_message(self, raw_data):
-        """解析模拟格式消息: MSG_ID|field=value,field=value"""
+    def _parse_simulated(self, raw_data):
+        """解析模拟格式: MSG_ID 33|altitude=50.0,heading=120"""
         try:
-            # 移除MSG_ID前缀
             content = raw_data.replace("MSG_ID", "").strip()
             if "|" in content:
                 parts = content.split("|")
@@ -157,7 +99,6 @@ class MAVLinkMessage:
                             key, value = pair.split("=")
                             key = key.strip()
                             value = value.strip()
-                            # 尝试转换数字
                             try:
                                 if "." in value:
                                     payload[key] = float(value)
@@ -169,194 +110,78 @@ class MAVLinkMessage:
                 return self._process_message(msg_id, payload)
             return None
         except Exception as e:
-            return {"error": f"解析模拟消息失败: {str(e)}"}
+            return {"error": f"解析失败: {str(e)}"}
     
-    def _parse_hex_message(self, raw_data):
-        """解析十六进制MAVLink消息"""
-        # 简化实现：模拟解析
-        hex_str = raw_data.replace(" ", "").upper()
-        if len(hex_str) < 10:
-            return {"error": "消息太短"}
-        
-        # 提取消息ID（简化：从第6-8字节）
+    def _parse_hex(self, raw_data):
+        """解析十六进制消息"""
         try:
-            msg_id = int(hex_str[6:8], 16)
-            return self._process_message(msg_id, {"hex_data": raw_data})
+            hex_str = raw_data.replace(" ", "").upper()
+            if len(hex_str) >= 8:
+                msg_id = int(hex_str[6:8], 16)
+                return self._process_message(msg_id, {"hex_data": raw_data})
+            return {"error": "消息格式无效"}
         except:
             return {"error": "无法解析十六进制消息"}
     
-    def _parse_json_message(self, data):
-        """解析JSON格式消息"""
+    def _parse_json(self, data):
+        """解析JSON格式"""
         msg_id = data.get("msg_id", data.get("id", 0))
         payload = data.get("payload", data.get("data", {}))
         return self._process_message(msg_id, payload)
     
-    def _parse_text_message(self, text):
-        """解析文本消息（作为状态文本处理）"""
-        self.system_status["text_messages"].insert(0, {
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "text": text
-        })
-        if len(self.system_status["text_messages"]) > 20:
-            self.system_status["text_messages"].pop()
-        
-        result = {
-            "msg_id": self.MSG_ID_STATUSTEXT,
+    def _parse_text(self, text):
+        """解析文本消息（作为状态文本）"""
+        return {
+            "msg_id": 253,
             "msg_name": "STATUSTEXT",
             "severity": "INFO",
             "text": text,
             "timestamp": datetime.now().isoformat()
         }
-        self.last_message = result
-        self.message_history.insert(0, result)
-        if len(self.message_history) > 100:
-            self.message_history.pop()
-        return result
     
     def _process_message(self, msg_id, payload):
         """处理解析后的消息"""
+        msg_info = self.MESSAGE_TYPES.get(msg_id, {"name": f"UNKNOWN_{msg_id}", "description": "未知消息"})
+        
         result = {
             "msg_id": msg_id,
-            "timestamp": datetime.now().isoformat(),
-            "payload": payload
+            "msg_name": msg_info["name"],
+            "description": msg_info["description"],
+            "payload": payload,
+            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3]
         }
         
-        # 根据消息ID处理不同消息
-        if msg_id == self.MSG_ID_HEARTBEAT:
-            result["msg_name"] = "HEARTBEAT"
-            self._process_heartbeat(payload)
-        elif msg_id == self.MSG_ID_SYS_STATUS:
-            result["msg_name"] = "SYS_STATUS"
-            self._process_sys_status(payload)
-        elif msg_id == self.MSG_ID_GLOBAL_POSITION_INT:
-            result["msg_name"] = "GLOBAL_POSITION_INT"
-            self._process_global_position(payload)
-        elif msg_id == self.MSG_ID_ATTITUDE:
-            result["msg_name"] = "ATTITUDE"
-            self._process_attitude(payload)
-        elif msg_id == self.MSG_ID_VFR_HUD:
-            result["msg_name"] = "VFR_HUD"
-            self._process_vfr_hud(payload)
-        elif msg_id == self.MSG_ID_MISSION_CURRENT:
-            result["msg_name"] = "MISSION_CURRENT"
-            self._process_mission_current(payload)
-        elif msg_id == self.MSG_ID_MISSION_ITEM_REACHED:
-            result["msg_name"] = "MISSION_ITEM_REACHED"
-            self._process_mission_reached(payload)
-        elif msg_id == self.MSG_ID_STATUSTEXT:
-            result["msg_name"] = "STATUSTEXT"
-            self._process_statustext(payload)
-        else:
-            result["msg_name"] = f"UNKNOWN_{msg_id}"
-        
-        self.system_status["connected"] = True
+        # 更新系统状态
+        self.parsed_count += 1
         self.last_message = result
         self.message_history.insert(0, result)
-        if len(self.message_history) > 100:
+        if len(self.message_history) > 50:
             self.message_history.pop()
         
+        # 根据消息类型更新状态
+        if msg_id == 33 and "altitude" in payload:
+            self.system_status["altitude"] = payload.get("altitude", 0)
+        if msg_id == 74:
+            self.system_status["ground_speed"] = payload.get("ground_speed", 0)
+            if "altitude" in payload:
+                self.system_status["altitude"] = payload["altitude"]
+        if msg_id == 1:
+            if "battery_remaining" in payload:
+                self.system_status["battery"] = payload["battery_remaining"]
+        
+        self.system_status["connected"] = True
         return result
     
-    def _process_heartbeat(self, payload):
-        """处理心跳消息"""
-        state = payload.get("state", self.MAV_STATE_ACTIVE)
-        mode = payload.get("mode", 4)
-        armed = payload.get("armed", False)
-        
-        self.system_status["state"] = state
-        self.system_status["mode"] = mode
-        self.system_status["armed"] = armed
-        self.system_status["connected"] = True
-    
-    def _process_sys_status(self, payload):
-        """处理系统状态消息"""
-        if "battery_voltage" in payload:
-            self.system_status["battery_voltage"] = payload["battery_voltage"]
-        if "battery_remaining" in payload:
-            self.system_status["battery_remaining"] = payload["battery_remaining"]
-        if "gps_fix" in payload:
-            self.system_status["gps_fix"] = payload["gps_fix"]
-        if "satellites" in payload:
-            self.system_status["satellites"] = payload["satellites"]
-    
-    def _process_global_position(self, payload):
-        """处理全局位置消息"""
-        if "altitude" in payload:
-            self.system_status["altitude"] = payload["altitude"]
-        if "relative_alt" in payload:
-            self.system_status["relative_alt"] = payload["relative_alt"]
-        if "heading" in payload:
-            self.system_status["heading"] = payload["heading"]
-    
-    def _process_attitude(self, payload):
-        """处理姿态消息"""
-        if "roll" in payload:
-            self.system_status["roll"] = payload["roll"]
-        if "pitch" in payload:
-            self.system_status["pitch"] = payload["pitch"]
-        if "yaw" in payload:
-            self.system_status["yaw"] = payload["yaw"]
-    
-    def _process_vfr_hud(self, payload):
-        """处理VFR_HUD消息"""
-        if "ground_speed" in payload:
-            self.system_status["ground_speed"] = payload["ground_speed"]
-        if "air_speed" in payload:
-            self.system_status["air_speed"] = payload["air_speed"]
-        if "climb_rate" in payload:
-            self.system_status["climb_rate"] = payload["climb_rate"]
-        if "heading" in payload:
-            self.system_status["heading"] = payload["heading"]
-        if "altitude" in payload:
-            self.system_status["altitude"] = payload["altitude"]
-    
-    def _process_mission_current(self, payload):
-        """处理当前任务消息"""
-        if "seq" in payload:
-            self.system_status["mission_current"] = payload["seq"]
-        if "count" in payload:
-            self.system_status["mission_count"] = payload["count"]
-    
-    def _process_mission_reached(self, payload):
-        """处理任务到达消息"""
-        if "seq" in payload:
-            self.system_status["mission_current"] = payload["seq"]
-    
-    def _process_statustext(self, payload):
-        """处理状态文本消息"""
-        text = payload.get("text", "")
-        severity = payload.get("severity", "INFO")
-        self.system_status["text_messages"].insert(0, {
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "severity": severity,
-            "text": text
-        })
-        if len(self.system_status["text_messages"]) > 20:
-            self.system_status["text_messages"].pop()
+    def get_message_types(self):
+        """获取所有支持的消息类型"""
+        return self.MESSAGE_TYPES
     
     def get_status(self):
-        """获取当前系统状态摘要"""
-        state_name = self.MAV_STATE_NAMES.get(self.system_status["state"], "未知")
-        mode_name = self.MODE_NAMES.get(self.system_status["mode"], "未知")
-        arm_status = "🔓 已解锁" if self.system_status["armed"] else "🔒 已锁定"
-        
-        return {
-            "connection": "🟢 已连接" if self.system_status["connected"] else "🔴 未连接",
-            "state": state_name,
-            "mode": mode_name,
-            "arm_status": arm_status,
-            "battery": f"{self.system_status['battery_remaining']}%",
-            "voltage": f"{self.system_status['battery_voltage']:.1f}V",
-            "gps": f"定位{self.system_status['gps_fix']}级 ({self.system_status['satellites']}颗)",
-            "altitude": f"{self.system_status['altitude']:.1f}m",
-            "ground_speed": f"{self.system_status['ground_speed']:.1f}m/s",
-            "air_speed": f"{self.system_status['air_speed']:.1f}m/s",
-            "attitude": f"R:{self.system_status['roll']:.1f}° P:{self.system_status['pitch']:.1f}° Y:{self.system_status['yaw']:.1f}°"
-        }
+        """获取系统状态"""
+        return self.system_status
 
 #-------------------------------------------------------------------------------
-# 坐标转换函数（纯 Python 实现，无第三方依赖）
-# 基于 eviltransform 算法，已测试往返误差 0.14m
+# 坐标转换函数
 #-------------------------------------------------------------------------------
 def out_of_china(lng, lat):
     return not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271)
@@ -410,14 +235,6 @@ def gcj02_to_wgs84(lng, lat):
         wgs_lat -= delta_lat
     return [wgs_lng, wgs_lat]
 
-def transform_to_gcj02(lng, lat, from_coord):
-    if from_coord == "WGS-84":
-        return wgs84_to_gcj02(lng, lat)
-    return lng, lat
-
-def transform_to_display(lng, lat, to_coord):
-    return lng, lat
-
 #-------------------------------------------------------------------------------
 # 障碍物管理
 #-------------------------------------------------------------------------------
@@ -442,7 +259,7 @@ def save_obstacles(obstacles):
         'obstacles': obstacles,
         'count': len(obstacles),
         'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'version': 'v16.0_folium_wgs84_fixed',
+        'version': 'v17.0_mavlink',
         'coord_sys': 'GCJ-02'
     }
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -758,7 +575,7 @@ def add_comm_log(message, direction="OBC内部"):
         st.session_state.comm_logs = st.session_state.comm_logs[:50]
 
 #-------------------------------------------------------------------------------
-# 地图创建（关键修改：所有显示坐标 GCJ-02 -> WGS-84）
+# 地图创建
 #-------------------------------------------------------------------------------
 def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt, enable_draw=False):
     center_wgs = gcj02_to_wgs84(center_gcj[0], center_gcj[1])
@@ -834,11 +651,13 @@ def init():
         'draw_enabled': False,
         'drawn_polygon': None,
         'show_add_dialog': False,
-        # MAVLink相关状态（新增）
-        'mavlink_parser': MAVLinkMessage(),
+        # MAVLink相关状态
+        'mavlink_parser': MAVLinkParser(),
         'mavlink_input': "",
         'mavlink_logs': [],
-        'show_mavlink_panel': True
+        'mavlink_data_source': "模拟数据",
+        'mavlink_interface': "已连接",
+        'mavlink_mode': "Simulation Mode"
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1004,130 +823,94 @@ def main():
                     else:
                         st.error("请先在航线规划页面设置路径")
 
+            # ===== MAVLink消息解析面板（侧边栏） =====
             st.markdown("---")
-            st.subheader("📡 MAVLink 消息解析")  # 新增MAVLink面板
-            st.session_state.show_mavlink_panel = st.checkbox("展开MAVLink消息面板", value=st.session_state.show_mavlink_panel)
+            st.subheader("📡 MAVLink 消息解析")
             
-            if st.session_state.show_mavlink_panel:
-                # MAVLink消息输入
-                col_input1, col_input2 = st.columns([3, 1])
-                with col_input1:
-                    mav_input = st.text_input(
-                        "输入MAVLink消息 (支持格式: MSG_ID|field=value 或 HEX 或 JSON)",
-                        value=st.session_state.mavlink_input,
-                        placeholder="例如: MSG_ID 33|altitude=50.0,relative_alt=45.0,heading=120",
-                        key="mavlink_input_field"
-                    )
-                    st.session_state.mavlink_input = mav_input
-                with col_input2:
-                    if st.button("📤 解析消息", use_container_width=True):
-                        if mav_input.strip():
-                            parser = st.session_state.mavlink_parser
-                            result = parser.parse_message(mav_input)
-                            if result:
-                                st.session_state.mavlink_logs.insert(0, {
-                                    "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-                                    "input": mav_input,
-                                    "result": result
-                                })
-                                if len(st.session_state.mavlink_logs) > 50:
-                                    st.session_state.mavlink_logs.pop()
-                                add_comm_log(f"MAVLink解析: {result.get('msg_name', '未知')}", "FCU → OBC → GCS")
-                                st.rerun()
-                
-                # 快捷消息按钮
-                st.markdown("#### 快捷测试消息")
-                col_quick1, col_quick2, col_quick3, col_quick4, col_quick5 = st.columns(5)
-                quick_messages = {
-                    "心跳": "MSG_ID 0|state=4,mode=4,armed=True",
-                    "位置": "MSG_ID 33|altitude=50.0,relative_alt=45.0,heading=120",
-                    "姿态": "MSG_ID 30|roll=0.5,pitch=-0.3,yaw=45.0",
-                    "速度": "MSG_ID 74|ground_speed=5.0,air_speed=4.8,climb_rate=0.5",
-                    "状态": "MSG_ID 1|battery_voltage=12.6,battery_remaining=85,gps_fix=3,satellites=12"
-                }
-                with col_quick1:
-                    if st.button("💓 心跳", use_container_width=True):
-                        st.session_state.mavlink_input = quick_messages["心跳"]
-                        st.rerun()
-                with col_quick2:
-                    if st.button("📍 位置", use_container_width=True):
-                        st.session_state.mavlink_input = quick_messages["位置"]
-                        st.rerun()
-                with col_quick3:
-                    if st.button("📐 姿态", use_container_width=True):
-                        st.session_state.mavlink_input = quick_messages["姿态"]
-                        st.rerun()
-                with col_quick4:
-                    if st.button("💨 速度", use_container_width=True):
-                        st.session_state.mavlink_input = quick_messages["速度"]
-                        st.rerun()
-                with col_quick5:
-                    if st.button("🔋 状态", use_container_width=True):
-                        st.session_state.mavlink_input = quick_messages["状态"]
-                        st.rerun()
-                
-                # 解析结果显示
-                if st.session_state.mavlink_logs:
-                    latest = st.session_state.mavlink_logs[0]
-                    result = latest.get("result", {})
-                    
-                    st.markdown("#### 最新解析结果")
-                    col_res1, col_res2 = st.columns(2)
-                    with col_res1:
-                        st.metric("消息ID", f"MSG_{result.get('msg_id', '?')}")
-                        st.metric("消息名称", result.get('msg_name', '未知'))
-                    with col_res2:
-                        st.metric("时间", latest.get('time', ''))
-                        st.metric("原始输入", latest.get('input', '')[:30] + "...")
-                    
-                    if "payload" in result and result["payload"]:
-                        st.markdown("#### 载荷数据")
-                        st.json(result["payload"])
-                    
-                    # 系统状态摘要
-                    st.markdown("#### 系统状态摘要")
-                    status = st.session_state.mavlink_parser.get_status()
-                    cols = st.columns(4)
-                    with cols[0]:
-                        st.metric("连接状态", status["connection"])
-                        st.metric("飞行状态", status["state"])
-                    with cols[1]:
-                        st.metric("飞行模式", status["mode"])
-                        st.metric("解锁状态", status["arm_status"])
-                    with cols[2]:
-                        st.metric("电池", status["battery"])
-                        st.metric("电压", status["voltage"])
-                    with cols[3]:
-                        st.metric("GPS", status["gps"])
-                        st.metric("高度", status["altitude"])
-                    
-                    st.markdown("#### 姿态信息")
-                    col_att1, col_att2 = st.columns(2)
-                    with col_att1:
-                        st.metric("地面速度", status["ground_speed"])
-                        st.metric("空速", status["air_speed"])
-                    with col_att2:
-                        st.metric("姿态", status["attitude"])
-                    
-                    # 历史消息日志
-                    with st.expander("📋 MAVLink消息历史", expanded=False):
-                        for log in st.session_state.mavlink_logs[:10]:
-                            result = log.get("result", {})
-                            st.caption(f"[{log.get('time', '')}] {result.get('msg_name', '未知')}: {json.dumps(result.get('payload', {}), ensure_ascii=False)[:100]}")
-                    
-                    # 状态文本消息
-                    text_msgs = st.session_state.mavlink_parser.system_status.get("text_messages", [])
-                    if text_msgs:
-                        st.markdown("#### 状态文本消息")
-                        for msg in text_msgs[:5]:
-                            st.info(f"[{msg.get('time', '')}] {msg.get('text', '')}")
+            # 数据源选择
+            st.markdown("#### 当前数据源")
+            data_source = st.selectbox(
+                "数据源",
+                ["模拟数据", "Simulation Mode"],
+                index=0 if st.session_state.mavlink_data_source == "模拟数据" else 1,
+                key="mavlink_data_source_select"
+            )
+            st.session_state.mavlink_data_source = data_source
             
+            # 接口状态
+            st.markdown("#### 接口状态")
+            interface_status = st.selectbox(
+                "接口",
+                ["已连接", "已断开", "连接中"],
+                index=0 if st.session_state.mavlink_interface == "已连接" else 1,
+                key="mavlink_interface_select"
+            )
+            st.session_state.mavlink_interface = interface_status
+            
+            # 模式
+            st.markdown("#### 模式")
+            mode = st.selectbox(
+                "模式",
+                ["Simulation Mode", "Real Mode", "Hybrid Mode"],
+                index=0 if st.session_state.mavlink_mode == "Simulation Mode" else 1,
+                key="mavlink_mode_select"
+            )
+            st.session_state.mavlink_mode = mode
+            
+            # 消息类型统计
+            st.markdown("#### 消息类型")
+            msg_types = st.session_state.mavlink_parser.get_message_types()
+            st.metric("已定义消息", f"{len(msg_types)} 种")
+            
+            # MAVLink消息类型表格
+            st.markdown("#### 支持的 MAVLink 消息类型")
+            msg_data = []
+            for msg_id, info in msg_types.items():
+                msg_data.append({
+                    "名称": info["name"],
+                    "值": msg_id,
+                    "描述": info["description"]
+                })
+            if msg_data:
+                df = pd.DataFrame(msg_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            # 消息输入
             st.markdown("---")
+            st.markdown("#### 消息输入")
+            mav_input = st.text_input(
+                "输入MAVLink消息",
+                value=st.session_state.mavlink_input,
+                placeholder="例如: MSG_ID 33|altitude=50.0,heading=120",
+                key="mavlink_input_field"
+            )
+            st.session_state.mavlink_input = mav_input
+            
+            col_parse, col_clear = st.columns(2)
+            with col_parse:
+                if st.button("📤 解析消息", use_container_width=True):
+                    if mav_input.strip():
+                        parser = st.session_state.mavlink_parser
+                        result = parser.parse_message(mav_input)
+                        if result:
+                            st.session_state.mavlink_logs.insert(0, {
+                                "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                                "input": mav_input,
+                                "result": result
+                            })
+                            if len(st.session_state.mavlink_logs) > 50:
+                                st.session_state.mavlink_logs.pop()
+                            add_comm_log(f"MAVLink解析: {result.get('msg_name', '未知')}", "FCU → OBC → GCS")
+                            st.rerun()
+            with col_clear:
+                if st.button("🗑️ 清空日志", use_container_width=True):
+                    st.session_state.mavlink_logs = []
+                    st.rerun()
 
     # ==================== 障碍物管理页面 ====================
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
-        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v16.0_folium_wgs84_fixed")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v17.0_mavlink")
         st.info("📂 所有障碍物坐标均以 GCJ-02 存储，与高德底图完全对齐。")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -1391,10 +1174,42 @@ def main():
     # ==================== 飞行监控页面 ====================
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
+        
+        # MAVLink状态面板（主区域顶部）
+        col_mav_status1, col_mav_status2, col_mav_status3, col_mav_status4 = st.columns(4)
+        parser = st.session_state.mavlink_parser
+        status = parser.get_status()
+        
+        with col_mav_status1:
+            st.metric("当前数据源", st.session_state.mavlink_data_source)
+        with col_mav_status2:
+            st.metric("接口状态", st.session_state.mavlink_interface)
+        with col_mav_status3:
+            st.metric("模式", st.session_state.mavlink_mode)
+        with col_mav_status4:
+            st.metric("已解析消息", parser.parsed_count)
+        
+        # MAVLink消息类型快速参考
+        with st.expander("📋 MAVLink 消息类型参考", expanded=False):
+            msg_types = parser.get_message_types()
+            msg_data = []
+            for msg_id, info in msg_types.items():
+                msg_data.append({
+                    "名称": info["name"],
+                    "值": msg_id,
+                    "描述": info["description"]
+                })
+            if msg_data:
+                df = pd.DataFrame(msg_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        
         if st.session_state.flight_started and st.session_state.sim and not st.session_state.sim.finished:
             st_autorefresh(interval=2000, key="monitor_auto")
         else:
             st.info("✈️ 飞行任务已结束，页面已停止自动刷新。")
+        
         if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.sim and st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
@@ -1409,6 +1224,7 @@ def main():
                         st.session_state.flight_trail.pop(0)
                 else:
                     break
+        
         if st.session_state.sim and st.session_state.sim.arrival_flag:
             idx = st.session_state.sim.arrived_wp_index
             total_wp = len(st.session_state.sim.waypoints)
@@ -1421,19 +1237,24 @@ def main():
             st.session_state.last_arrival_msg = msg
             st.session_state.sim.arrival_flag = False
             st.rerun()
+        
         if st.session_state.flight_started and st.session_state.sim and st.session_state.sim.finished:
             st.session_state.flight_started = False
             st.session_state.flight_paused = False
             if not st.session_state.last_arrival_msg:
                 st.session_state.last_arrival_msg = "飞行已到达终点。"
                 add_comm_log("MISSION_COMPLETE", "FCU → OBC → GCS")
+        
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始或已结束。请切换到「航线规划」页面，设置起点终点并点击「开始飞行」。")
+        
         if st.session_state.last_arrival_msg:
             st.success(st.session_state.last_arrival_msg)
+        
         if st.session_state.latest_hb is None:
             st.warning("等待第一个心跳...")
             st.stop()
+        
         hb = st.session_state.latest_hb
         current_wp = st.session_state.sim.current_wp_idx
         total_wp = len(st.session_state.sim.waypoints)
@@ -1443,7 +1264,9 @@ def main():
         elapsed = hb.flight_time
         remaining_dist = (1 - progress) * path_length(st.session_state.sim.waypoints) * 111000
         eta_sec = remaining_dist / speed if speed > 0 else 0
+        
         col_left, col_right = st.columns([1, 1.5])
+        
         with col_left:
             st.markdown("### 📊 任务状态")
             st.metric("当前航点", f"{reached_wp+1} / {total_wp}")
@@ -1484,6 +1307,17 @@ def main():
             st.markdown(f"- **OBC ↔ FCU**: 正常")
             st.markdown(f"- **延迟**: ~{delay:.0f}ms")
             st.markdown(f"- **丢包率**: {loss:.1f}%")
+            
+            # MAVLink消息日志
+            st.markdown("---")
+            st.markdown("### 📋 MAVLink 消息日志")
+            if st.session_state.mavlink_logs:
+                for log in st.session_state.mavlink_logs[:10]:
+                    result = log.get("result", {})
+                    st.caption(f"[{log.get('time', '')}] {result.get('msg_name', '未知')}: {json.dumps(result.get('payload', {}), ensure_ascii=False)[:80]}")
+            else:
+                st.info("暂无MAVLink消息")
+        
         with col_right:
             st.subheader("🗺️ 实时飞行地图")
             center = [st.session_state.sim.current_pos[0], st.session_state.sim.current_pos[1]]
@@ -1517,6 +1351,7 @@ def main():
             drone_wgs = gcj02_to_wgs84(center[0], center[1])
             folium.Marker([drone_wgs[1], drone_wgs[0]], icon=folium.Icon(color='blue')).add_to(m)
             folium_static(m, width=700, height=500)
+        
         st.markdown("---")
         st.subheader("📋 通信日志")
         if st.session_state.comm_logs:
@@ -1546,8 +1381,6 @@ def main():
             st.line_chart(df, x="时间", y="高度")
         else:
             st.info("等待更多数据...")
-        
-        # MAVLink解析面板已在侧边栏显示，这里不再重复
 
 if __name__ == "__main__":
     main()
