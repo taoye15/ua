@@ -11,369 +11,353 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from streamlit_autorefresh import st_autorefresh
 from folium.plugins import Draw
-from folium import plugins
 
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 配置
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 学校中心点(GCJ-02)
-
-# 深色地图瓦片 - QGC风格
-# 使用CartoDB深色地图（免费，无需密钥）
-DARK_TILE = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-
-# 高德地图深色风格（如果有密钥可用）
-# GAODE_DARK_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-
-# 备选：OpenStreetMap深色
-# DARK_TILE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-
+GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
 HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED = 5.0
 HOVER_SECONDS = 5
 CONFIG_FILE = "obstacle_config.json"
 
-
-# ----------------------------------------------------------------------
-# 创建QGC风格的地图
-# ----------------------------------------------------------------------
-def create_qgc_style_map(center_gcj, zoom_start=18, tiles=DARK_TILE):
-    """
-    创建QGC地面站风格的地图 - 深色背景
-    """
-    center_wgs = gcj02_to_wgs84(center_gcj[0], center_gcj[1])
+#-------------------------------------------------------------------------------
+# MAVLink消息解析类（新增）
+#-------------------------------------------------------------------------------
+class MAVLinkMessage:
+    """MAVLink消息解析器 - 模拟MAVLink协议消息解析"""
     
-    m = folium.Map(
-        location=[center_wgs[1], center_wgs[0]],
-        zoom_start=zoom_start,
-        tiles=tiles,
-        attr='CartoDB',
-        zoom_control=True
-    )
+    # MAVLink消息ID定义
+    MSG_ID_HEARTBEAT = 0
+    MSG_ID_SYS_STATUS = 1
+    MSG_ID_GLOBAL_POSITION_INT = 33
+    MSG_ID_ATTITUDE = 30
+    MSG_ID_VFR_HUD = 74
+    MSG_ID_MISSION_CURRENT = 43
+    MSG_ID_MISSION_ITEM_REACHED = 46
+    MSG_ID_STATUSTEXT = 253
     
-    # 添加比例尺
-    folium.plugins.MeasureControl(
-        position='topleft',
-        primary_length_unit='meters',
-        secondary_length_unit='kilometers'
-    ).add_to(m)
+    # 系统状态
+    MAV_STATE_UNINIT = 0
+    MAV_STATE_BOOT = 1
+    MAV_STATE_CALIBRATING = 2
+    MAV_STATE_STANDBY = 3
+    MAV_STATE_ACTIVE = 4
+    MAV_STATE_CRITICAL = 5
+    MAV_STATE_EMERGENCY = 6
+    MAV_STATE_POWEROFF = 7
+    MAV_STATE_FLIGHT_TERMINATION = 8
     
-    return m
-
-
-def add_drone_marker(map_obj, position_wgs, heading=0, altitude=50, label="无人机"):
-    """
-    添加无人机标记 - QGC风格
-    """
-    # 无人机图标 - 使用自定义HTML
-    drone_icon = folium.DivIcon(
-        html=f'''
-        <div style="position: relative; width: 40px; height: 40px;">
-            <svg width="40" height="40" viewBox="0 0 40 40">
-                <!-- 外圈 -->
-                <circle cx="20" cy="20" r="18" fill="none" stroke="#00e5ff" stroke-width="2" opacity="0.6"/>
-                <!-- 内圈 -->
-                <circle cx="20" cy="20" r="8" fill="#00e5ff" opacity="0.8"/>
-                <!-- 中心点 -->
-                <circle cx="20" cy="20" r="3" fill="#ffffff"/>
-                <!-- 航向指示 -->
-                <line x1="20" y1="20" x2="20" y2="4" stroke="#00e5ff" stroke-width="3" 
-                      transform="rotate({heading}, 20, 20)" marker-end="url(#arrow)"/>
-            </svg>
-            <svg style="position: absolute; width: 0; height: 0;">
-                <defs>
-                    <marker id="arrow" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
-                        <path d="M0,0 L6,3 L0,6 Z" fill="#00e5ff"/>
-                    </marker>
-                </defs>
-            </svg>
-        </div>
-        ''',
-        icon_size=(40, 40),
-        icon_anchor=(20, 20)
-    )
-    
-    folium.Marker(
-        [position_wgs[1], position_wgs[0]],
-        icon=drone_icon,
-        popup=f"🚁 {label}\n高度: {altitude}m",
-        tooltip=f"{label} - {altitude}m"
-    ).add_to(map_obj)
-
-
-def add_waypoint_marker(map_obj, position_wgs, index, is_current=False, is_reached=False):
-    """
-    添加航点标记 - QGC风格
-    """
-    if is_reached:
-        color = "#4CAF50"  # 绿色 - 已到达
-        text_color = "#ffffff"
-        label = f"✓ {index}"
-    elif is_current:
-        color = "#FF9800"  # 橙色 - 当前目标
-        text_color = "#ffffff"
-        label = f"▶ {index}"
-    else:
-        color = "#2196F3"  # 蓝色 - 未到达
-        text_color = "#ffffff"
-        label = f"{index}"
-    
-    # 航点圆圈
-    folium.CircleMarker(
-        [position_wgs[1], position_wgs[0]],
-        radius=10,
-        color=color,
-        fill=True,
-        fill_color=color,
-        fill_opacity=0.7,
-        weight=2,
-        popup=f"航点 {index}",
-        tooltip=f"航点 {index}"
-    ).add_to(map_obj)
-    
-    # 航点编号
-    folium.map.Marker(
-        [position_wgs[1], position_wgs[0]],
-        icon=folium.DivIcon(
-            html=f'<div style="font-size: 10px; font-weight: bold; color: {text_color}; text-shadow: 0 0 3px rgba(0,0,0,0.8);">{label}</div>',
-            icon_size=(20, 20),
-            icon_anchor=(10, 10)
-        )
-    ).add_to(map_obj)
-
-
-def add_flight_path(map_obj, path_wgs, color="#00e5ff", weight=3, opacity=0.8):
-    """
-    添加飞行路径 - QGC风格
-    """
-    if len(path_wgs) > 1:
-        folium.PolyLine(
-            [[p[1], p[0]] for p in path_wgs],
-            color=color,
-            weight=weight,
-            opacity=opacity,
-            popup=f"航线长度: {len(path_wgs)} 段"
-        ).add_to(map_obj)
-
-
-def add_trail(map_obj, trail_wgs, color="#FF6B00", weight=2, opacity=0.6):
-    """
-    添加飞行轨迹 - QGC风格
-    """
-    if len(trail_wgs) > 1:
-        folium.PolyLine(
-            [[lat, lng] for lng, lat in trail_wgs],
-            color=color,
-            weight=weight,
-            opacity=opacity,
-            popup="飞行轨迹"
-        ).add_to(map_obj)
-
-
-def add_obstacles_on_map(map_obj, obstacles, flight_alt):
-    """
-    添加障碍物 - QGC风格
-    """
-    for obs in obstacles:
-        coords_gcj = obs.get('polygon', [])
-        height = obs.get('height', 30)
-        if coords_gcj and len(coords_gcj) >= 3:
-            coords_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in coords_gcj]
-            is_blocking = height > flight_alt
-            color = "#FF1744" if is_blocking else "#FFC107"  # 红色如果阻挡航线，黄色如果低于飞行高度
-            fill_color = "#FF1744" if is_blocking else "#FFC107"
-            fill_opacity = 0.3 if is_blocking else 0.15
-            
-            folium.Polygon(
-                [[c[1], c[0]] for c in coords_wgs],
-                color=color,
-                weight=2,
-                fill=True,
-                fill_color=fill_color,
-                fill_opacity=fill_opacity,
-                popup=f"🚧 {obs.get('name', '障碍物')}\n高度: {height}m\n{'⚠️ 阻挡航线' if is_blocking else '✅ 低于飞行高度'}"
-            ).add_to(map_obj)
-
-
-# ----------------------------------------------------------------------
-# MAVLink 消息解析器
-# ----------------------------------------------------------------------
-class MAVLinkMessageType:
-    """MAVLink 消息类型定义"""
-    HEARTBEAT = 0
-    STATUS = 1
-    GLOBAL_POSITION_INT = 33
-    ATTITUDE = 30
-    VFR_HUD = 74
-
-
-class MAVLinkParser:
-    """MAVLink 消息解析器"""
-    
-    TYPE_NAMES = {
-        0: "HEARTBEAT",
-        1: "STATUS", 
-        33: "GLOBAL_POSITION_INT",
-        30: "ATTITUDE",
-        74: "VFR_HUD"
+    MAV_STATE_NAMES = {
+        0: "未初始化",
+        1: "启动中",
+        2: "校准中",
+        3: "待机",
+        4: "激活",
+        5: "严重警告",
+        6: "紧急状态",
+        7: "关机",
+        8: "飞行终止"
     }
     
-    @staticmethod
-    def parse_heartbeat(data):
-        return {
-            "type": "HEARTBEAT",
-            "type_id": 0,
-            "system_status": data.get("system_status", "ACTIVE"),
-            "mode": data.get("mode", "AUTO"),
-            "version": data.get("version", 3),
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        }
+    # 飞行模式
+    MODE_NAMES = {
+        0: "手动",
+        1: "增稳",
+        2: "定高",
+        3: "悬停",
+        4: "自主",
+        5: "任务",
+        6: "返航",
+        7: "降落",
+        8: "跟随",
+        9: "特技",
+        10: "方位",
+        11: "起飞",
+        12: "着陆"
+    }
     
-    @staticmethod
-    def parse_status(data):
-        return {
-            "type": "STATUS",
-            "type_id": 1,
-            "voltage": data.get("voltage", 12.6),
-            "current": data.get("current", 0.5),
-            "remaining": data.get("remaining", 85),
-            "temperature": data.get("temperature", 25.0),
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        }
+    def __init__(self):
+        self.reset()
     
-    @staticmethod
-    def parse_global_position(data):
-        return {
-            "type": "GLOBAL_POSITION_INT",
-            "type_id": 33,
-            "lat": data.get("lat", 32.234097),
-            "lng": data.get("lng", 118.749413),
-            "alt": data.get("alt", 50.0),
-            "relative_alt": data.get("relative_alt", 0.0),
-            "vx": data.get("vx", 0.0),
-            "vy": data.get("vy", 0.0),
-            "vz": data.get("vz", 0.0),
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    def reset(self):
+        """重置解析器状态"""
+        self.last_message = None
+        self.message_history = []
+        self.system_status = {
+            "connected": False,
+            "sysid": 1,
+            "compid": 1,
+            "state": self.MAV_STATE_STANDBY,
+            "mode": 4,  # 自主模式
+            "armed": False,
+            "battery_voltage": 12.6,
+            "battery_remaining": 85,
+            "gps_fix": 3,
+            "satellites": 12,
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0,
+            "altitude": 0.0,
+            "relative_alt": 0.0,
+            "ground_speed": 0.0,
+            "air_speed": 0.0,
+            "climb_rate": 0.0,
+            "heading": 0,
+            "mission_current": 0,
+            "mission_count": 0,
+            "text_messages": []
         }
+        self.parsed_messages = []
     
-    @staticmethod
-    def parse_attitude(data):
-        return {
-            "type": "ATTITUDE",
-            "type_id": 30,
-            "roll": data.get("roll", 0.0),
-            "pitch": data.get("pitch", 0.0),
-            "yaw": data.get("yaw", 0.0),
-            "rollspeed": data.get("rollspeed", 0.0),
-            "pitchspeed": data.get("pitchspeed", 0.0),
-            "yawspeed": data.get("yawspeed", 0.0),
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    def parse_message(self, raw_data):
+        """
+        解析原始MAVLink消息
+        模拟输入格式: "MSG_ID|payload_field1=value1,field2=value2,..."
+        或标准MAVLink十六进制格式
+        """
+        try:
+            if isinstance(raw_data, str):
+                raw_data = raw_data.strip()
+                
+                # 检测消息格式
+                if raw_data.startswith("MSG_ID"):
+                    return self._parse_simulated_message(raw_data)
+                elif raw_data.startswith("FE") or all(c in "0123456789ABCDEF" for c in raw_data.replace(" ", "").upper()):
+                    return self._parse_hex_message(raw_data)
+                else:
+                    # 尝试解析为JSON格式
+                    try:
+                        data = json.loads(raw_data)
+                        return self._parse_json_message(data)
+                    except:
+                        return self._parse_text_message(raw_data)
+            elif isinstance(raw_data, dict):
+                return self._parse_json_message(raw_data)
+            else:
+                return None
+        except Exception as e:
+            return {"error": f"解析失败: {str(e)}"}
+    
+    def _parse_simulated_message(self, raw_data):
+        """解析模拟格式消息: MSG_ID|field=value,field=value"""
+        try:
+            # 移除MSG_ID前缀
+            content = raw_data.replace("MSG_ID", "").strip()
+            if "|" in content:
+                parts = content.split("|")
+                msg_id = int(parts[0].strip())
+                payload_str = parts[1] if len(parts) > 1 else ""
+                
+                payload = {}
+                if payload_str:
+                    for pair in payload_str.split(","):
+                        if "=" in pair:
+                            key, value = pair.split("=")
+                            key = key.strip()
+                            value = value.strip()
+                            # 尝试转换数字
+                            try:
+                                if "." in value:
+                                    payload[key] = float(value)
+                                else:
+                                    payload[key] = int(value)
+                            except:
+                                payload[key] = value
+                
+                return self._process_message(msg_id, payload)
+            return None
+        except Exception as e:
+            return {"error": f"解析模拟消息失败: {str(e)}"}
+    
+    def _parse_hex_message(self, raw_data):
+        """解析十六进制MAVLink消息"""
+        # 简化实现：模拟解析
+        hex_str = raw_data.replace(" ", "").upper()
+        if len(hex_str) < 10:
+            return {"error": "消息太短"}
+        
+        # 提取消息ID（简化：从第6-8字节）
+        try:
+            msg_id = int(hex_str[6:8], 16)
+            return self._process_message(msg_id, {"hex_data": raw_data})
+        except:
+            return {"error": "无法解析十六进制消息"}
+    
+    def _parse_json_message(self, data):
+        """解析JSON格式消息"""
+        msg_id = data.get("msg_id", data.get("id", 0))
+        payload = data.get("payload", data.get("data", {}))
+        return self._process_message(msg_id, payload)
+    
+    def _parse_text_message(self, text):
+        """解析文本消息（作为状态文本处理）"""
+        self.system_status["text_messages"].insert(0, {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "text": text
+        })
+        if len(self.system_status["text_messages"]) > 20:
+            self.system_status["text_messages"].pop()
+        
+        result = {
+            "msg_id": self.MSG_ID_STATUSTEXT,
+            "msg_name": "STATUSTEXT",
+            "severity": "INFO",
+            "text": text,
+            "timestamp": datetime.now().isoformat()
         }
+        self.last_message = result
+        self.message_history.insert(0, result)
+        if len(self.message_history) > 100:
+            self.message_history.pop()
+        return result
     
-    @staticmethod
-    def parse_vfr_hud(data):
-        return {
-            "type": "VFR_HUD",
-            "type_id": 74,
-            "airspeed": data.get("airspeed", 0.0),
-            "groundspeed": data.get("groundspeed", 0.0),
-            "heading": data.get("heading", 0),
-            "throttle": data.get("throttle", 0),
-            "alt": data.get("alt", 50.0),
-            "climb": data.get("climb", 0.0),
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    def _process_message(self, msg_id, payload):
+        """处理解析后的消息"""
+        result = {
+            "msg_id": msg_id,
+            "timestamp": datetime.now().isoformat(),
+            "payload": payload
         }
-    
-    @staticmethod
-    def parse_message(raw_msg):
-        msg_type = raw_msg.get("type_id", -1)
-        if msg_type == 0:
-            return MAVLinkParser.parse_heartbeat(raw_msg)
-        elif msg_type == 1:
-            return MAVLinkParser.parse_status(raw_msg)
-        elif msg_type == 33:
-            return MAVLinkParser.parse_global_position(raw_msg)
-        elif msg_type == 30:
-            return MAVLinkParser.parse_attitude(raw_msg)
-        elif msg_type == 74:
-            return MAVLinkParser.parse_vfr_hud(raw_msg)
+        
+        # 根据消息ID处理不同消息
+        if msg_id == self.MSG_ID_HEARTBEAT:
+            result["msg_name"] = "HEARTBEAT"
+            self._process_heartbeat(payload)
+        elif msg_id == self.MSG_ID_SYS_STATUS:
+            result["msg_name"] = "SYS_STATUS"
+            self._process_sys_status(payload)
+        elif msg_id == self.MSG_ID_GLOBAL_POSITION_INT:
+            result["msg_name"] = "GLOBAL_POSITION_INT"
+            self._process_global_position(payload)
+        elif msg_id == self.MSG_ID_ATTITUDE:
+            result["msg_name"] = "ATTITUDE"
+            self._process_attitude(payload)
+        elif msg_id == self.MSG_ID_VFR_HUD:
+            result["msg_name"] = "VFR_HUD"
+            self._process_vfr_hud(payload)
+        elif msg_id == self.MSG_ID_MISSION_CURRENT:
+            result["msg_name"] = "MISSION_CURRENT"
+            self._process_mission_current(payload)
+        elif msg_id == self.MSG_ID_MISSION_ITEM_REACHED:
+            result["msg_name"] = "MISSION_ITEM_REACHED"
+            self._process_mission_reached(payload)
+        elif msg_id == self.MSG_ID_STATUSTEXT:
+            result["msg_name"] = "STATUSTEXT"
+            self._process_statustext(payload)
         else:
-            return {
-                "type": "UNKNOWN",
-                "type_id": msg_type,
-                "raw_data": raw_msg,
-                "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            }
+            result["msg_name"] = f"UNKNOWN_{msg_id}"
+        
+        self.system_status["connected"] = True
+        self.last_message = result
+        self.message_history.insert(0, result)
+        if len(self.message_history) > 100:
+            self.message_history.pop()
+        
+        return result
     
-    @staticmethod
-    def generate_sim_heartbeat():
-        return {
-            "type_id": 0,
-            "system_status": "ACTIVE",
-            "mode": random.choice(["AUTO", "GUIDED", "STABILIZE"]),
-            "version": 3
-        }
+    def _process_heartbeat(self, payload):
+        """处理心跳消息"""
+        state = payload.get("state", self.MAV_STATE_ACTIVE)
+        mode = payload.get("mode", 4)
+        armed = payload.get("armed", False)
+        
+        self.system_status["state"] = state
+        self.system_status["mode"] = mode
+        self.system_status["armed"] = armed
+        self.system_status["connected"] = True
     
-    @staticmethod
-    def generate_sim_status():
-        return {
-            "type_id": 1,
-            "voltage": round(12.0 + random.uniform(0, 1.5), 2),
-            "current": round(random.uniform(0.1, 2.0), 2),
-            "remaining": random.randint(30, 99),
-            "temperature": round(20 + random.uniform(0, 15), 1)
-        }
+    def _process_sys_status(self, payload):
+        """处理系统状态消息"""
+        if "battery_voltage" in payload:
+            self.system_status["battery_voltage"] = payload["battery_voltage"]
+        if "battery_remaining" in payload:
+            self.system_status["battery_remaining"] = payload["battery_remaining"]
+        if "gps_fix" in payload:
+            self.system_status["gps_fix"] = payload["gps_fix"]
+        if "satellites" in payload:
+            self.system_status["satellites"] = payload["satellites"]
     
-    @staticmethod
-    def generate_sim_global_position(lat, lng, alt):
-        return {
-            "type_id": 33,
-            "lat": lat + random.uniform(-0.0001, 0.0001),
-            "lng": lng + random.uniform(-0.0001, 0.0001),
-            "alt": alt + random.uniform(-0.5, 0.5),
-            "relative_alt": random.uniform(-1, 1),
-            "vx": random.uniform(-0.5, 0.5),
-            "vy": random.uniform(-0.5, 0.5),
-            "vz": random.uniform(-0.5, 0.5)
-        }
+    def _process_global_position(self, payload):
+        """处理全局位置消息"""
+        if "altitude" in payload:
+            self.system_status["altitude"] = payload["altitude"]
+        if "relative_alt" in payload:
+            self.system_status["relative_alt"] = payload["relative_alt"]
+        if "heading" in payload:
+            self.system_status["heading"] = payload["heading"]
     
-    @staticmethod
-    def generate_sim_attitude():
-        return {
-            "type_id": 30,
-            "roll": random.uniform(-5, 5),
-            "pitch": random.uniform(-5, 5),
-            "yaw": random.uniform(0, 360),
-            "rollspeed": random.uniform(-0.1, 0.1),
-            "pitchspeed": random.uniform(-0.1, 0.1),
-            "yawspeed": random.uniform(-0.1, 0.1)
-        }
+    def _process_attitude(self, payload):
+        """处理姿态消息"""
+        if "roll" in payload:
+            self.system_status["roll"] = payload["roll"]
+        if "pitch" in payload:
+            self.system_status["pitch"] = payload["pitch"]
+        if "yaw" in payload:
+            self.system_status["yaw"] = payload["yaw"]
     
-    @staticmethod
-    def generate_sim_vfr_hud(groundspeed, heading, alt):
+    def _process_vfr_hud(self, payload):
+        """处理VFR_HUD消息"""
+        if "ground_speed" in payload:
+            self.system_status["ground_speed"] = payload["ground_speed"]
+        if "air_speed" in payload:
+            self.system_status["air_speed"] = payload["air_speed"]
+        if "climb_rate" in payload:
+            self.system_status["climb_rate"] = payload["climb_rate"]
+        if "heading" in payload:
+            self.system_status["heading"] = payload["heading"]
+        if "altitude" in payload:
+            self.system_status["altitude"] = payload["altitude"]
+    
+    def _process_mission_current(self, payload):
+        """处理当前任务消息"""
+        if "seq" in payload:
+            self.system_status["mission_current"] = payload["seq"]
+        if "count" in payload:
+            self.system_status["mission_count"] = payload["count"]
+    
+    def _process_mission_reached(self, payload):
+        """处理任务到达消息"""
+        if "seq" in payload:
+            self.system_status["mission_current"] = payload["seq"]
+    
+    def _process_statustext(self, payload):
+        """处理状态文本消息"""
+        text = payload.get("text", "")
+        severity = payload.get("severity", "INFO")
+        self.system_status["text_messages"].insert(0, {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "severity": severity,
+            "text": text
+        })
+        if len(self.system_status["text_messages"]) > 20:
+            self.system_status["text_messages"].pop()
+    
+    def get_status(self):
+        """获取当前系统状态摘要"""
+        state_name = self.MAV_STATE_NAMES.get(self.system_status["state"], "未知")
+        mode_name = self.MODE_NAMES.get(self.system_status["mode"], "未知")
+        arm_status = "🔓 已解锁" if self.system_status["armed"] else "🔒 已锁定"
+        
         return {
-            "type_id": 74,
-            "airspeed": round(groundspeed * random.uniform(0.9, 1.1), 1),
-            "groundspeed": round(groundspeed, 1),
-            "heading": int(heading + random.uniform(-5, 5)) % 360,
-            "throttle": random.randint(20, 80),
-            "alt": round(alt + random.uniform(-0.3, 0.3), 1),
-            "climb": round(random.uniform(-1, 2), 1)
+            "connection": "🟢 已连接" if self.system_status["connected"] else "🔴 未连接",
+            "state": state_name,
+            "mode": mode_name,
+            "arm_status": arm_status,
+            "battery": f"{self.system_status['battery_remaining']}%",
+            "voltage": f"{self.system_status['battery_voltage']:.1f}V",
+            "gps": f"定位{self.system_status['gps_fix']}级 ({self.system_status['satellites']}颗)",
+            "altitude": f"{self.system_status['altitude']:.1f}m",
+            "ground_speed": f"{self.system_status['ground_speed']:.1f}m/s",
+            "air_speed": f"{self.system_status['air_speed']:.1f}m/s",
+            "attitude": f"R:{self.system_status['roll']:.1f}° P:{self.system_status['pitch']:.1f}° Y:{self.system_status['yaw']:.1f}°"
         }
 
-
-def init_mavlink_state():
-    if "mavlink_messages" not in st.session_state:
-        st.session_state.mavlink_messages = []
-    if "mavlink_latest" not in st.session_state:
-        st.session_state.mavlink_latest = {}
-    if "mavlink_data_source" not in st.session_state:
-        st.session_state.mavlink_data_source = "模拟数据"
-
-
-# ----------------------------------------------------------------------
-# 坐标转换函数
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+# 坐标转换函数（纯 Python 实现，无第三方依赖）
+# 基于 eviltransform 算法，已测试往返误差 0.14m
+#-------------------------------------------------------------------------------
 def out_of_china(lng, lat):
     return not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271)
 
@@ -426,10 +410,17 @@ def gcj02_to_wgs84(lng, lat):
         wgs_lat -= delta_lat
     return [wgs_lng, wgs_lat]
 
+def transform_to_gcj02(lng, lat, from_coord):
+    if from_coord == "WGS-84":
+        return wgs84_to_gcj02(lng, lat)
+    return lng, lat
 
-# ----------------------------------------------------------------------
+def transform_to_display(lng, lat, to_coord):
+    return lng, lat
+
+#-------------------------------------------------------------------------------
 # 障碍物管理
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 def load_obstacles():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -451,16 +442,15 @@ def save_obstacles(obstacles):
         'obstacles': obstacles,
         'count': len(obstacles),
         'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'version': 'v17.0_qgc_style',
+        'version': 'v16.0_folium_wgs84_fixed',
         'coord_sys': 'GCJ-02'
     }
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 几何辅助函数
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 def distance(p1, p2):
     return math.hypot(p1[0]-p2[0], p1[1]-p2[1])
 
@@ -520,10 +510,9 @@ def meters_to_deg(meters, lat=32.23):
     lng_deg = meters / (111000 * math.cos(math.radians(lat)))
     return lng_deg, lat_deg
 
-
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 绕行算法
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 def compute_blocked_bounds(blocking_obs):
     min_lng = float('inf')
     max_lng = -float('inf')
@@ -610,10 +599,9 @@ def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_r
     else:
         return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
-
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 等分航点生成
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 def path_length(path):
     total = 0.0
     for i in range(len(path)-1):
@@ -647,10 +635,9 @@ def generate_equidistant_waypoints(path, num_segments=6):
         waypoints.append(interpolate_at_distance(path, dist))
     return waypoints
 
-
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 心跳模拟器
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
@@ -758,10 +745,9 @@ class HeartbeatSim:
             self._add_heartbeat()
         return self.history[-1] if self.history else None
 
-
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 通信日志
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 def add_comm_log(message, direction="OBC内部"):
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     log_entry = {"time": timestamp, "direction": direction, "message": message}
@@ -771,15 +757,60 @@ def add_comm_log(message, direction="OBC内部"):
     if len(st.session_state.comm_logs) > 50:
         st.session_state.comm_logs = st.session_state.comm_logs[:50]
 
+#-------------------------------------------------------------------------------
+# 地图创建（关键修改：所有显示坐标 GCJ-02 -> WGS-84）
+#-------------------------------------------------------------------------------
+def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt, enable_draw=False):
+    center_wgs = gcj02_to_wgs84(center_gcj[0], center_gcj[1])
+    m = folium.Map(location=[center_wgs[1], center_wgs[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
+    for obs in obstacles:
+        coords_gcj = obs.get('polygon', [])
+        height = obs.get('height', 30)
+        if coords_gcj and len(coords_gcj) >= 3:
+            coords_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in coords_gcj]
+            color = "red" if height > flight_alt else "orange"
+            folium.Polygon([[c[1], c[0]] for c in coords_wgs], color=color, weight=2,
+                          fill=True, fill_color=color, fill_opacity=0.4,
+                          popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m").add_to(m)
+    if points_gcj.get('A'):
+        a_wgs = gcj02_to_wgs84(points_gcj['A'][0], points_gcj['A'][1])
+        folium.Marker([a_wgs[1], a_wgs[0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
+    if points_gcj.get('B'):
+        b_wgs = gcj02_to_wgs84(points_gcj['B'][0], points_gcj['B'][1])
+        folium.Marker([b_wgs[1], b_wgs[0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
+    if plan_path and len(plan_path) > 1:
+        path_wgs = [gcj02_to_wgs84(p[0], p[1]) for p in plan_path]
+        folium.PolyLine([[p[1], p[0]] for p in path_wgs], color='green', weight=4).add_to(m)
+    if flight_trail:
+        trail_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in flight_trail[-100:]]
+        folium.PolyLine([[lat, lng] for lng, lat in trail_wgs], color='orange', weight=2).add_to(m)
+    if drone_pos_gcj:
+        drone_wgs = gcj02_to_wgs84(drone_pos_gcj[0], drone_pos_gcj[1])
+        folium.Marker([drone_wgs[1], drone_wgs[0]], icon=folium.Icon(color='blue')).add_to(m)
+    if enable_draw:
+        draw = Draw(
+            draw_options={
+                "polygon": {"allowIntersection": False, "drawError": {"color": "#e1e100", "message": "多边形不能相交"},
+                           "shapeOptions": {"color": "#ff7800", "weight": 3}},
+                "polyline": False,
+                "rectangle": False,
+                "circle": False,
+                "marker": False,
+                "circlemarker": False
+            },
+            edit_options={"edit": False, "remove": False}
+        )
+        draw.add_to(m)
+    return m
 
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 初始化状态
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 def init():
     DEFAULT_A_GCJ = [118.753501, 32.231118]
     DEFAULT_B_GCJ = [118.754725, 32.234240]
     defaults = {
-        'page': '飞行监控',
+        'page': '航线规划',
         'points_gcj': {'A': DEFAULT_A_GCJ.copy(), 'B': DEFAULT_B_GCJ.copy()},
         'sim': HeartbeatSim(DEFAULT_A_GCJ.copy()),
         'flight_started': False,
@@ -803,13 +834,15 @@ def init():
         'draw_enabled': False,
         'drawn_polygon': None,
         'show_add_dialog': False,
-        'tile_style': '深色 (QGC风格)'
+        # MAVLink相关状态（新增）
+        'mavlink_parser': MAVLinkMessage(),
+        'mavlink_input': "",
+        'mavlink_logs': [],
+        'show_mavlink_panel': True
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-    init_mavlink_state()
-
 
 def update_plan_and_waypoints():
     if st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
@@ -832,53 +865,9 @@ def update_plan_and_waypoints():
         st.session_state.plan_path = None
         st.session_state.waypoints = None
 
-
-# ----------------------------------------------------------------------
-# MAVLink 模拟数据生成
-# ----------------------------------------------------------------------
-def update_mavlink_sim_data():
-    if not st.session_state.flight_started:
-        return
-    sim = st.session_state.sim
-    if not sim or not sim.running:
-        return
-    lat = sim.current_pos[1]
-    lng = sim.current_pos[0]
-    alt = sim.altitude
-    speed = BASE_SPEED * (st.session_state.drone_speed / 100.0)
-    heading = 0
-    if sim.current_wp_idx < len(sim.waypoints):
-        target = sim.waypoints[sim.current_wp_idx]
-        dx = target[0] - sim.current_pos[0]
-        dy = target[1] - sim.current_pos[1]
-        if abs(dx) > 1e-10 or abs(dy) > 1e-10:
-            heading = math.degrees(math.atan2(dx, dy)) % 360
-    
-    messages = []
-    messages.append(MAVLinkParser.parse_message(MAVLinkParser.generate_sim_heartbeat()))
-    messages.append(MAVLinkParser.parse_message(MAVLinkParser.generate_sim_status()))
-    messages.append(MAVLinkParser.parse_message(MAVLinkParser.generate_sim_global_position(lng, lat, alt)))
-    messages.append(MAVLinkParser.parse_message(MAVLinkParser.generate_sim_attitude()))
-    messages.append(MAVLinkParser.parse_message(MAVLinkParser.generate_sim_vfr_hud(speed, heading, alt)))
-    
-    for msg in messages:
-        st.session_state.mavlink_messages.insert(0, msg)
-        st.session_state.mavlink_latest[msg['type']] = msg
-    if len(st.session_state.mavlink_messages) > 100:
-        st.session_state.mavlink_messages = st.session_state.mavlink_messages[:100]
-
-
-def get_mavlink_message_count():
-    counts = {}
-    for msg in st.session_state.mavlink_messages:
-        msg_type = msg.get('type', 'UNKNOWN')
-        counts[msg_type] = counts.get(msg_type, 0) + 1
-    return counts
-
-
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 # 主程序
-# ----------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="南京科技职业学院 - 无人机地面站", layout="wide")
     st.title("🏫 南京科技职业学院 - 无人机地面站系统")
@@ -890,25 +879,16 @@ def main():
         selected_page = st.radio("功能页面", ["航线规划", "飞行监控", "障碍物管理"],
                                 index=["航线规划", "飞行监控", "障碍物管理"].index(st.session_state.page))
         st.session_state.page = selected_page
-        
-        st.markdown("---")
-        st.subheader("🗺️ 地图设置")
-        tile_style = st.selectbox("地图样式", ["深色 (QGC风格)", "浅色", "卫星"], 
-                                 index=["深色 (QGC风格)", "浅色", "卫星"].index(st.session_state.tile_style))
-        st.session_state.tile_style = tile_style
-        
         st.markdown("---")
         st.subheader("🗺️ 坐标系设置")
         coord_choice = st.radio("输入坐标系", ["WGS-84", "GCJ-02(高德/百度)"],
                                index=1 if st.session_state.coord_sys == "GCJ-02" else 0)
         st.session_state.coord_sys = "WGS-84" if coord_choice == "WGS-84" else "GCJ-02"
-        
         st.markdown("---")
         st.subheader("📊 系统状态")
         st.checkbox("A点已设", value=st.session_state.points_gcj.get('A') is not None, disabled=True)
         st.checkbox("B点已设", value=st.session_state.points_gcj.get('B') is not None, disabled=True)
         st.checkbox("飞行进行中", value=st.session_state.flight_started, disabled=True)
-        
         st.markdown("---")
         st.subheader("🎮 控制面板")
 
@@ -927,7 +907,6 @@ def main():
                 st.session_state.safety_radius = new_radius
                 update_plan_and_waypoints()
                 st.rerun()
-            
             st.markdown("---")
             st.subheader("🤖 避障策略")
             direction = st.radio("绕行方向", ["最佳航线", "向左绕行", "向右绕行"],
@@ -936,7 +915,6 @@ def main():
                 st.session_state.avoid_direction = direction
                 update_plan_and_waypoints()
                 st.rerun()
-            
             st.markdown("---")
             col_start, col_stop = st.columns(2)
             with col_start:
@@ -954,8 +932,6 @@ def main():
                         st.session_state.flight_started = True
                         st.session_state.flight_paused = False
                         st.session_state.last_arrival_msg = ""
-                        st.session_state.mavlink_messages = []
-                        st.session_state.mavlink_latest = {}
                         st.success("飞行已开始，切换至「飞行监控」查看动态")
                         st.rerun()
                     else:
@@ -970,12 +946,6 @@ def main():
 
         # ===== 飞行监控页面的控制面板 =====
         elif st.session_state.page == "飞行监控":
-            st.markdown("#### 📡 数据源设置")
-            data_source = st.radio("MAVLink数据源", ["模拟数据", "SITL", "真实无人机"],
-                                  index=["模拟数据", "SITL", "真实无人机"].index(st.session_state.mavlink_data_source))
-            st.session_state.mavlink_data_source = data_source
-            
-            st.markdown("---")
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
                 if st.button("▶️ 开始任务", use_container_width=True):
@@ -990,8 +960,6 @@ def main():
                             st.session_state.flight_started = True
                             st.session_state.flight_paused = False
                             st.session_state.last_arrival_msg = ""
-                            st.session_state.mavlink_messages = []
-                            st.session_state.mavlink_latest = {}
                             st.rerun()
             with col_btn2:
                 if st.button("⏸️ 暂停", use_container_width=True):
@@ -1017,13 +985,11 @@ def main():
                         st.session_state.flight_started = True
                         st.session_state.flight_paused = False
                         st.session_state.last_arrival_msg = ""
-                        st.session_state.mavlink_messages = []
-                        st.session_state.mavlink_latest = {}
                         st.rerun()
                     else:
                         st.error("请先在航线规划页面设置路径")
             with col_btn5:
-                if st.button("🔄 刷新飞行", use_container_width=True):
+                if st.button("🔄 刷新飞行", use_container_width=True, help="重新开始当前航线的飞行任务"):
                     if st.session_state.waypoints:
                         add_comm_log("手动刷新飞行", "GCS → OBC")
                         st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
@@ -1034,18 +1000,135 @@ def main():
                         st.session_state.flight_started = True
                         st.session_state.flight_paused = False
                         st.session_state.last_arrival_msg = ""
-                        st.session_state.mavlink_messages = []
-                        st.session_state.mavlink_latest = {}
                         st.rerun()
                     else:
                         st.error("请先在航线规划页面设置路径")
 
+            st.markdown("---")
+            st.subheader("📡 MAVLink 消息解析")  # 新增MAVLink面板
+            st.session_state.show_mavlink_panel = st.checkbox("展开MAVLink消息面板", value=st.session_state.show_mavlink_panel)
+            
+            if st.session_state.show_mavlink_panel:
+                # MAVLink消息输入
+                col_input1, col_input2 = st.columns([3, 1])
+                with col_input1:
+                    mav_input = st.text_input(
+                        "输入MAVLink消息 (支持格式: MSG_ID|field=value 或 HEX 或 JSON)",
+                        value=st.session_state.mavlink_input,
+                        placeholder="例如: MSG_ID 33|altitude=50.0,relative_alt=45.0,heading=120",
+                        key="mavlink_input_field"
+                    )
+                    st.session_state.mavlink_input = mav_input
+                with col_input2:
+                    if st.button("📤 解析消息", use_container_width=True):
+                        if mav_input.strip():
+                            parser = st.session_state.mavlink_parser
+                            result = parser.parse_message(mav_input)
+                            if result:
+                                st.session_state.mavlink_logs.insert(0, {
+                                    "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                                    "input": mav_input,
+                                    "result": result
+                                })
+                                if len(st.session_state.mavlink_logs) > 50:
+                                    st.session_state.mavlink_logs.pop()
+                                add_comm_log(f"MAVLink解析: {result.get('msg_name', '未知')}", "FCU → OBC → GCS")
+                                st.rerun()
+                
+                # 快捷消息按钮
+                st.markdown("#### 快捷测试消息")
+                col_quick1, col_quick2, col_quick3, col_quick4, col_quick5 = st.columns(5)
+                quick_messages = {
+                    "心跳": "MSG_ID 0|state=4,mode=4,armed=True",
+                    "位置": "MSG_ID 33|altitude=50.0,relative_alt=45.0,heading=120",
+                    "姿态": "MSG_ID 30|roll=0.5,pitch=-0.3,yaw=45.0",
+                    "速度": "MSG_ID 74|ground_speed=5.0,air_speed=4.8,climb_rate=0.5",
+                    "状态": "MSG_ID 1|battery_voltage=12.6,battery_remaining=85,gps_fix=3,satellites=12"
+                }
+                with col_quick1:
+                    if st.button("💓 心跳", use_container_width=True):
+                        st.session_state.mavlink_input = quick_messages["心跳"]
+                        st.rerun()
+                with col_quick2:
+                    if st.button("📍 位置", use_container_width=True):
+                        st.session_state.mavlink_input = quick_messages["位置"]
+                        st.rerun()
+                with col_quick3:
+                    if st.button("📐 姿态", use_container_width=True):
+                        st.session_state.mavlink_input = quick_messages["姿态"]
+                        st.rerun()
+                with col_quick4:
+                    if st.button("💨 速度", use_container_width=True):
+                        st.session_state.mavlink_input = quick_messages["速度"]
+                        st.rerun()
+                with col_quick5:
+                    if st.button("🔋 状态", use_container_width=True):
+                        st.session_state.mavlink_input = quick_messages["状态"]
+                        st.rerun()
+                
+                # 解析结果显示
+                if st.session_state.mavlink_logs:
+                    latest = st.session_state.mavlink_logs[0]
+                    result = latest.get("result", {})
+                    
+                    st.markdown("#### 最新解析结果")
+                    col_res1, col_res2 = st.columns(2)
+                    with col_res1:
+                        st.metric("消息ID", f"MSG_{result.get('msg_id', '?')}")
+                        st.metric("消息名称", result.get('msg_name', '未知'))
+                    with col_res2:
+                        st.metric("时间", latest.get('time', ''))
+                        st.metric("原始输入", latest.get('input', '')[:30] + "...")
+                    
+                    if "payload" in result and result["payload"]:
+                        st.markdown("#### 载荷数据")
+                        st.json(result["payload"])
+                    
+                    # 系统状态摘要
+                    st.markdown("#### 系统状态摘要")
+                    status = st.session_state.mavlink_parser.get_status()
+                    cols = st.columns(4)
+                    with cols[0]:
+                        st.metric("连接状态", status["connection"])
+                        st.metric("飞行状态", status["state"])
+                    with cols[1]:
+                        st.metric("飞行模式", status["mode"])
+                        st.metric("解锁状态", status["arm_status"])
+                    with cols[2]:
+                        st.metric("电池", status["battery"])
+                        st.metric("电压", status["voltage"])
+                    with cols[3]:
+                        st.metric("GPS", status["gps"])
+                        st.metric("高度", status["altitude"])
+                    
+                    st.markdown("#### 姿态信息")
+                    col_att1, col_att2 = st.columns(2)
+                    with col_att1:
+                        st.metric("地面速度", status["ground_speed"])
+                        st.metric("空速", status["air_speed"])
+                    with col_att2:
+                        st.metric("姿态", status["attitude"])
+                    
+                    # 历史消息日志
+                    with st.expander("📋 MAVLink消息历史", expanded=False):
+                        for log in st.session_state.mavlink_logs[:10]:
+                            result = log.get("result", {})
+                            st.caption(f"[{log.get('time', '')}] {result.get('msg_name', '未知')}: {json.dumps(result.get('payload', {}), ensure_ascii=False)[:100]}")
+                    
+                    # 状态文本消息
+                    text_msgs = st.session_state.mavlink_parser.system_status.get("text_messages", [])
+                    if text_msgs:
+                        st.markdown("#### 状态文本消息")
+                        for msg in text_msgs[:5]:
+                            st.info(f"[{msg.get('time', '')}] {msg.get('text', '')}")
+            
+            st.markdown("---")
+
     # ==================== 障碍物管理页面 ====================
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
-        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v17.0_qgc_style")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v16.0_folium_wgs84_fixed")
         st.info("📂 所有障碍物坐标均以 GCJ-02 存储，与高德底图完全对齐。")
-        
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("💾 保存到文件", use_container_width=True):
@@ -1065,7 +1148,6 @@ def main():
         with col4:
             if st.button("🚀 一键部署", use_container_width=True):
                 st.info("此功能用于部署，示例中未实现")
-        
         st.markdown("---")
         st.subheader("📥 下载配置文件到本地")
         if st.button("📥 下载 obstacle_config.json", use_container_width=True):
@@ -1074,7 +1156,6 @@ def main():
                     st.download_button("点击下载", data=f, file_name=CONFIG_FILE, mime="application/json")
             else:
                 st.warning("配置文件不存在，请先保存")
-        
         st.markdown("---")
         st.subheader("➕ 添加新障碍物（手动输入顶点）")
         with st.form("add_obstacle_form"):
@@ -1111,7 +1192,6 @@ def main():
                     st.rerun()
                 else:
                     st.error("至少需要3个顶点")
-        
         st.markdown("---")
         st.subheader(f"📋 当前障碍物列表 (共 {len(st.session_state.obstacles)} 个)")
         for idx, obs in enumerate(st.session_state.obstacles):
@@ -1132,7 +1212,6 @@ def main():
                         st.rerun()
                 with col_c:
                     st.code(json.dumps(obs.get('polygon', []), indent=2), language='json')
-        
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -1142,90 +1221,123 @@ def main():
 
     # ==================== 航线规划页面 ====================
     elif st.session_state.page == "航线规划":
-        st.header("🗺️ 航线规划")
-        st.info("🔧 点击地图设置航点，绘制多边形圈选障碍物")
-        
+        st.header("🗺️ 航线规划 - 点击地图 + 方向微调 + 手动输入坐标 + 多边形圈选障碍物")
+        st.info("🔧 **坐标修正说明**：绘制多边形时，系统会自动将 WGS-84 坐标转换为 GCJ-02 存储，确保与高德底图完全对齐，圈选不再偏移。")
         col_map, col_panel = st.columns([3, 1.2])
-        
         with col_panel:
             st.markdown("### 🎯 航点控制")
             if not st.session_state.flight_started:
-                draw_enabled = st.checkbox("✏️ 启用多边形绘制", value=st.session_state.draw_enabled)
+                draw_enabled = st.checkbox("✏️ 启用多边形绘制（圈选障碍物）", value=st.session_state.draw_enabled)
                 if draw_enabled != st.session_state.draw_enabled:
                     st.session_state.draw_enabled = draw_enabled
                     st.rerun()
             else:
-                st.info("飞行任务进行中")
-            
+                st.info("飞行任务进行中，无法使用绘制工具")
+            st.markdown("---")
+            with st.expander("✏️ 手动输入起点/终点坐标", expanded=False):
+                st.markdown("**注意：坐标将根据左侧「坐标系设置」自动转换为GCJ-02存储**")
+                col_a_in, col_b_in = st.columns(2)
+                with col_a_in:
+                    st.markdown("#### 起点 A")
+                    a_lng_input = st.number_input("经度 (A)", value=st.session_state.points_gcj['A'][0], format="%.6f", key="manual_a_lng")
+                    a_lat_input = st.number_input("纬度 (A)", value=st.session_state.points_gcj['A'][1], format="%.6f", key="manual_a_lat")
+                with col_b_in:
+                    st.markdown("#### 终点 B")
+                    b_lng_input = st.number_input("经度 (B)", value=st.session_state.points_gcj['B'][0], format="%.6f", key="manual_b_lng")
+                    b_lat_input = st.number_input("纬度 (B)", value=st.session_state.points_gcj['B'][1], format="%.6f", key="manual_b_lat")
+                if st.button("📌 应用手动输入坐标", key="apply_manual_coords"):
+                    current_sys = st.session_state.coord_sys
+                    if current_sys == "WGS-84":
+                        a_gcj = wgs84_to_gcj02(a_lng_input, a_lat_input)
+                        b_gcj = wgs84_to_gcj02(b_lng_input, b_lat_input)
+                    else:
+                        a_gcj = [a_lng_input, a_lat_input]
+                        b_gcj = [b_lng_input, b_lat_input]
+                    st.session_state.points_gcj['A'] = a_gcj
+                    st.session_state.points_gcj['B'] = b_gcj
+                    update_plan_and_waypoints()
+                    st.success("坐标已更新，地图和航线已刷新")
+                    st.rerun()
             st.markdown("---")
             if st.session_state.flight_started:
-                st.warning("飞行任务进行中，无法修改航点")
+                st.warning("飞行任务进行中，无法修改航点。请先停止飞行。")
                 select_mode = st.radio("当前可移动的点", ["起点 (A)", "终点 (B)"], key="mode_disabled", disabled=True, horizontal=True)
             else:
                 select_mode = st.radio("当前可移动的点", ["起点 (A)", "终点 (B)"],
                                       index=0 if st.session_state.point_select_mode == 'A' else 1,
                                       key="move_select", horizontal=True)
                 st.session_state.point_select_mode = 'A' if select_mode == "起点 (A)" else 'B'
-            
             st.markdown("---")
             st.markdown("#### 📍 当前坐标 (GCJ-02)")
             a_lng, a_lat = st.session_state.points_gcj['A']
             b_lng, b_lat = st.session_state.points_gcj['B']
             st.text(f"起点 A : {a_lng:.6f}, {a_lat:.6f}")
             st.text(f"终点 B : {b_lng:.6f}, {b_lat:.6f}")
-            
+            st.markdown("---")
+            st.markdown("#### 🎯 精确微调（每步约 1 米）")
+            col_dir1, col_dir2, col_dir3, col_dir4 = st.columns(4)
+            step = 0.00001
+            if st.session_state.point_select_mode == 'A':
+                target = st.session_state.points_gcj['A']
+            else:
+                target = st.session_state.points_gcj['B']
+            if col_dir1.button("⬆️ 北", key="move_n"):
+                target[1] += step
+                if st.session_state.point_select_mode == 'A':
+                    st.session_state.points_gcj['A'] = target
+                else:
+                    st.session_state.points_gcj['B'] = target
+                update_plan_and_waypoints()
+                st.rerun()
+            if col_dir2.button("⬇️ 南", key="move_s"):
+                target[1] -= step
+                if st.session_state.point_select_mode == 'A':
+                    st.session_state.points_gcj['A'] = target
+                else:
+                    st.session_state.points_gcj['B'] = target
+                update_plan_and_waypoints()
+                st.rerun()
+            if col_dir3.button("⬅️ 西", key="move_w"):
+                target[0] -= step
+                if st.session_state.point_select_mode == 'A':
+                    st.session_state.points_gcj['A'] = target
+                else:
+                    st.session_state.points_gcj['B'] = target
+                update_plan_and_waypoints()
+                st.rerun()
+            if col_dir4.button("➡️ 东", key="move_e"):
+                target[0] += step
+                if st.session_state.point_select_mode == 'A':
+                    st.session_state.points_gcj['A'] = target
+                else:
+                    st.session_state.points_gcj['B'] = target
+                update_plan_and_waypoints()
+                st.rerun()
+            st.markdown("---")
+            st.info("💡 **操作提示**：\n- 上方选择要移动的点（A/B）\n- **单击地图** → 点跳转到点击位置（自动转GCJ-02）\n- 点击方向按钮 → 每次移动约 1 米\n- **勾选「启用多边形绘制」后，在地图上绘制多边形 → 自动弹出添加表单**")
             if st.session_state.plan_path:
                 waypoint_count = len(st.session_state.waypoints) - 2 if st.session_state.waypoints else 0
                 if waypoint_count > 0:
-                    st.info(f"航线已均匀分为6段，共{len(st.session_state.waypoints)}个航点")
+                    st.info(f"航线已均匀分为6段，包含 {waypoint_count+1} 个中间航点（总共{len(st.session_state.waypoints)}个航点），每个航点停留 {HOVER_SECONDS} 秒")
                 else:
-                    st.success("直线航线")
-        
+                    st.success("直线航线，无绕行")
         with col_map:
             if st.session_state.plan_path is None and st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
                 update_plan_and_waypoints()
-            
             drone_pos_gcj = None
             if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.latest_hb:
                 drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
-            
-            # 创建QGC风格地图
-            center_gcj = st.session_state.points_gcj['A'] if st.session_state.points_gcj.get('A') else SCHOOL_CENTER_GCJ
-            m = create_qgc_style_map(center_gcj, zoom_start=17)
-            
-            # 添加障碍物
-            add_obstacles_on_map(m, st.session_state.obstacles, st.session_state.flight_alt)
-            
-            # 添加航点
-            if st.session_state.points_gcj.get('A'):
-                a_wgs = gcj02_to_wgs84(st.session_state.points_gcj['A'][0], st.session_state.points_gcj['A'][1])
-                folium.Marker([a_wgs[1], a_wgs[0]], popup='起点A', icon=folium.Icon(color='green', icon='play')).add_to(m)
-            if st.session_state.points_gcj.get('B'):
-                b_wgs = gcj02_to_wgs84(st.session_state.points_gcj['B'][0], st.session_state.points_gcj['B'][1])
-                folium.Marker([b_wgs[1], b_wgs[0]], popup='终点B', icon=folium.Icon(color='red', icon='stop')).add_to(m)
-            
-            # 添加规划路径
-            if st.session_state.plan_path:
-                path_wgs = [gcj02_to_wgs84(p[0], p[1]) for p in st.session_state.plan_path]
-                add_flight_path(m, path_wgs, color="#00e5ff", weight=3)
-            
-            if st.session_state.draw_enabled and not st.session_state.flight_started:
-                draw = Draw(
-                    draw_options={
-                        "polygon": {"allowIntersection": False, "drawError": {"color": "#e1e100", "message": "多边形不能相交"},
-                                   "shapeOptions": {"color": "#ff7800", "weight": 3}},
-                        "polyline": False,
-                        "rectangle": False,
-                        "circle": False,
-                        "marker": False,
-                        "circlemarker": False
-                    },
-                    edit_options={"edit": False, "remove": False}
-                )
-                draw.add_to(m)
-            
-            map_output = st_folium(m, width=700, height=550, key="planning_map")
-            
+            folium_map = create_planning_map(
+                SCHOOL_CENTER_GCJ,
+                st.session_state.points_gcj,
+                st.session_state.obstacles,
+                st.session_state.flight_trail,
+                st.session_state.plan_path,
+                drone_pos_gcj,
+                st.session_state.flight_alt,
+                enable_draw=st.session_state.draw_enabled and not st.session_state.flight_started
+            )
+            map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
             if st.session_state.draw_enabled and not st.session_state.flight_started and map_output:
                 last_draw = map_output.get("last_active_drawing")
                 if last_draw and last_draw.get("geometry", {}).get("type") == "Polygon":
@@ -1235,14 +1347,13 @@ def main():
                     st.session_state.drawn_polygon = vertices_gcj
                     st.session_state.show_add_dialog = True
                     st.rerun()
-            
             if st.session_state.show_add_dialog and st.session_state.drawn_polygon:
-                with st.expander("✏️ 添加障碍物", expanded=True):
-                    obs_name = st.text_input("名称", f"障碍物_{datetime.now().strftime('%H%M%S')}")
+                with st.expander("✏️ 添加绘制的多边形作为障碍物", expanded=True):
+                    obs_name = st.text_input("障碍物名称", f"多边形障碍物_{datetime.now().strftime('%H%M%S')}")
                     obs_height = st.number_input("高度 (米)", min_value=1, max_value=200, value=30, step=5)
                     col_ok, col_cancel = st.columns(2)
                     with col_ok:
-                        if st.button("✅ 确认添加"):
+                        if st.button("✅ 确认添加", use_container_width=True):
                             new_obs = {
                                 "name": obs_name,
                                 "polygon": st.session_state.drawn_polygon,
@@ -1253,39 +1364,37 @@ def main():
                             st.session_state.obstacles.append(new_obs)
                             save_obstacles(st.session_state.obstacles)
                             update_plan_and_waypoints()
+                            add_comm_log(f"通过地图绘制添加障碍物「{obs_name}」", "GCS")
                             st.session_state.show_add_dialog = False
                             st.session_state.drawn_polygon = None
                             st.session_state.draw_enabled = False
-                            st.success("已添加")
+                            st.success("障碍物已添加，航线已重新规划")
                             st.rerun()
                     with col_cancel:
-                        if st.button("❌ 取消"):
+                        if st.button("❌ 取消", use_container_width=True):
                             st.session_state.show_add_dialog = False
                             st.session_state.drawn_polygon = None
                             st.rerun()
-            
             if (not st.session_state.draw_enabled) and (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
                 lat_click = map_output["last_clicked"]["lat"]
                 lng_click = map_output["last_clicked"]["lng"]
                 gcj_lng, gcj_lat = wgs84_to_gcj02(lng_click, lat_click)
                 if st.session_state.point_select_mode == 'A':
                     st.session_state.points_gcj['A'] = [gcj_lng, gcj_lat]
+                    st.success(f"起点 A 已移动到: ({gcj_lng:.6f}, {gcj_lat:.6f})")
                 else:
                     st.session_state.points_gcj['B'] = [gcj_lng, gcj_lat]
+                    st.success(f"终点 B 已移动到: ({gcj_lng:.6f}, {gcj_lat:.6f})")
                 update_plan_and_waypoints()
                 st.rerun()
 
     # ==================== 飞行监控页面 ====================
     else:
-        st.header("📡 飞行实时监控")
-        
-        # 自动刷新
+        st.header("📡 飞行实时画面 - 任务执行监控")
         if st.session_state.flight_started and st.session_state.sim and not st.session_state.sim.finished:
             st_autorefresh(interval=2000, key="monitor_auto")
         else:
-            st.info("✈️ 飞行任务已结束")
-        
-        # 更新飞行状态
+            st.info("✈️ 飞行任务已结束，页面已停止自动刷新。")
         if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.sim and st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
@@ -1300,37 +1409,31 @@ def main():
                         st.session_state.flight_trail.pop(0)
                 else:
                     break
-            if st.session_state.mavlink_data_source == "模拟数据":
-                update_mavlink_sim_data()
-        
-        # 航点到达通知
         if st.session_state.sim and st.session_state.sim.arrival_flag:
             idx = st.session_state.sim.arrived_wp_index
             total_wp = len(st.session_state.sim.waypoints)
             if idx == total_wp - 1:
                 msg = f"🎉 已到达终点（航点 {idx+1}/{total_wp}），飞行结束。"
-                add_comm_log(f"MISSION_COMPLETE", "FCU → OBC → GCS")
+                add_comm_log(f"MISSION_COMPLETE (航点 {idx+1}/{total_wp})", "FCU → OBC → GCS")
             else:
                 msg = f"📍 已到达航点 {idx+1}/{total_wp}，停留 {HOVER_SECONDS} 秒后继续..."
                 add_comm_log(f"WP_REACHED #{idx+1}", "FCU → OBC → GCS")
             st.session_state.last_arrival_msg = msg
             st.session_state.sim.arrival_flag = False
             st.rerun()
-        
         if st.session_state.flight_started and st.session_state.sim and st.session_state.sim.finished:
             st.session_state.flight_started = False
             st.session_state.flight_paused = False
             if not st.session_state.last_arrival_msg:
-                st.session_state.last_arrival_msg = "✅ 飞行已到达终点。"
+                st.session_state.last_arrival_msg = "飞行已到达终点。"
                 add_comm_log("MISSION_COMPLETE", "FCU → OBC → GCS")
-        
+        if not st.session_state.flight_started:
+            st.info("⏳ 飞行未开始或已结束。请切换到「航线规划」页面，设置起点终点并点击「开始飞行」。")
         if st.session_state.last_arrival_msg:
             st.success(st.session_state.last_arrival_msg)
-        
         if st.session_state.latest_hb is None:
-            st.warning("等待数据...")
+            st.warning("等待第一个心跳...")
             st.stop()
-        
         hb = st.session_state.latest_hb
         current_wp = st.session_state.sim.current_wp_idx
         total_wp = len(st.session_state.sim.waypoints)
@@ -1340,61 +1443,11 @@ def main():
         elapsed = hb.flight_time
         remaining_dist = (1 - progress) * path_length(st.session_state.sim.waypoints) * 111000
         eta_sec = remaining_dist / speed if speed > 0 else 0
-        
-        # ===== MAVLink Inspector =====
-        st.markdown("---")
-        st.subheader("📡 MAVLink 消息监视器")
-        
-        col_src, col_msg_count = st.columns(2)
-        with col_src:
-            st.markdown(f"**数据源**: {st.session_state.mavlink_data_source}")
-            if st.session_state.mavlink_data_source == "模拟数据":
-                st.info("🟢 模拟模式 - 已预留MAVLink接口")
-        
-        with col_msg_count:
-            msg_counts = get_mavlink_message_count()
-            st.markdown("**消息统计**")
-            for msg_type, count in msg_counts.items():
-                st.caption(f"- {msg_type}: {count}条")
-        
-        st.markdown("#### MAVLink 消息类型")
-        mavlink_types = [
-            {"名称": "HEARTBEAT", "值": 0, "描述": "系统心跳"},
-            {"名称": "STATUS", "值": 1, "描述": "电池状态"},
-            {"名称": "GLOBAL_POSITION_INT", "值": 33, "描述": "全球定位"},
-            {"名称": "ATTITUDE", "值": 30, "描述": "姿态信息"},
-            {"名称": "VFR_HUD", "值": 74, "描述": "飞行状态"},
-        ]
-        st.dataframe(pd.DataFrame(mavlink_types), use_container_width=True, hide_index=True)
-        
-        st.markdown("#### 最新消息")
-        if st.session_state.mavlink_latest:
-            cols = st.columns(5)
-            msg_display_order = ["HEARTBEAT", "STATUS", "GLOBAL_POSITION_INT", "ATTITUDE", "VFR_HUD"]
-            for col, msg_type in zip(cols, msg_display_order):
-                with col:
-                    msg = st.session_state.mavlink_latest.get(msg_type, {})
-                    st.markdown(f"**{msg_type}**")
-                    if msg:
-                        for key, value in msg.items():
-                            if key not in ["type", "type_id", "timestamp"]:
-                                if isinstance(value, float):
-                                    st.caption(f"{key}: {value:.2f}")
-                                else:
-                                    st.caption(f"{key}: {value}")
-                        st.caption(f"⏱ {msg.get('timestamp', '')}")
-                    else:
-                        st.caption("等待...")
-        
-        st.markdown("---")
-        
-        # ===== 任务状态 + 地图 =====
         col_left, col_right = st.columns([1, 1.5])
-        
         with col_left:
             st.markdown("### 📊 任务状态")
             st.metric("当前航点", f"{reached_wp+1} / {total_wp}")
-            st.progress(progress, text=f"进度: {int(progress*100)}%")
+            st.progress(progress, text=f"任务进度: {int(progress*100)}%")
             st.metric("飞行速度", f"{speed:.1f} m/s")
             minutes = int(elapsed // 60)
             seconds = int(elapsed % 60)
@@ -1403,110 +1456,98 @@ def main():
             eta_min = int(eta_sec // 60)
             eta_sec_int = int(eta_sec % 60)
             st.metric("预计到达", f"{eta_min:02d}:{eta_sec_int:02d}")
-            st.metric("电量", "40%")
-            
+            st.metric("电量模拟", "40%")
             st.markdown("---")
-            st.markdown("### 📡 通信链路")
+            st.markdown("### 📡 通信链路拓扑与数据流")
             col_gcs, col_obc, col_fcu = st.columns(3)
             with col_gcs:
-                st.markdown("**GCS**")
+                st.markdown("**GCS (地面站)**")
+                st.caption("192.168.1.100")
                 st.markdown("✅ 已连接")
             with col_obc:
-                st.markdown("**OBC**")
+                st.markdown("**OBC (机载计算机)**")
+                st.caption("Raspberry Pi 4")
                 st.markdown("✅ 已连接")
             with col_fcu:
-                st.markdown("**FCU**")
+                st.markdown("**FCU (飞控)**")
+                st.caption("PX4 / ArduPilot")
                 st.markdown("✅ 已连接")
-            
+            st.markdown("```\nGCS --UDP:14550--> OBC --MAVLink--> FCU\n```")
             if progress < 1:
                 delay = random.uniform(20, 35)
                 loss = random.uniform(0, 0.5)
             else:
                 delay = 10
                 loss = 0
-            st.markdown(f"- 延迟: ~{delay:.0f}ms")
-            st.markdown(f"- 丢包率: {loss:.1f}%")
-        
+            st.markdown("#### 链路统计")
+            st.markdown(f"- **GCS ↔ OBC**: 正常")
+            st.markdown(f"- **OBC ↔ FCU**: 正常")
+            st.markdown(f"- **延迟**: ~{delay:.0f}ms")
+            st.markdown(f"- **丢包率**: {loss:.1f}%")
         with col_right:
-            st.subheader("🗺️ 实时地图")
-            
-            # 获取地图样式
-            tile_url = DARK_TILE
-            if st.session_state.tile_style == "浅色":
-                tile_url = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-            elif st.session_state.tile_style == "卫星":
-                tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-            
+            st.subheader("🗺️ 实时飞行地图")
             center = [st.session_state.sim.current_pos[0], st.session_state.sim.current_pos[1]]
+            a = st.session_state.points_gcj['A']
+            b = st.session_state.points_gcj['B']
             center_wgs = gcj02_to_wgs84(center[0], center[1])
-            
-            # 创建QGC风格地图
-            m = create_qgc_style_map(center, zoom_start=18)
-            
-            # 添加障碍物
-            add_obstacles_on_map(m, st.session_state.obstacles, st.session_state.flight_alt)
-            
-            # 添加起点终点
-            if st.session_state.points_gcj.get('A'):
-                a_wgs = gcj02_to_wgs84(st.session_state.points_gcj['A'][0], st.session_state.points_gcj['A'][1])
-                folium.Marker([a_wgs[1], a_wgs[0]], popup='起点', icon=folium.Icon(color='green', icon='play')).add_to(m)
-            if st.session_state.points_gcj.get('B'):
-                b_wgs = gcj02_to_wgs84(st.session_state.points_gcj['B'][0], st.session_state.points_gcj['B'][1])
-                folium.Marker([b_wgs[1], b_wgs[0]], popup='终点', icon=folium.Icon(color='red', icon='stop')).add_to(m)
-            
-            # 添加规划路径
+            m = folium.Map(location=[center_wgs[1], center_wgs[0]], zoom_start=18, tiles=GAODE_TILE, attr='高德')
+            for obs in st.session_state.obstacles:
+                coords_gcj = obs.get('polygon', [])
+                height = obs.get('height', 30)
+                if coords_gcj and len(coords_gcj) >= 3:
+                    coords_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in coords_gcj]
+                    color = "red" if height > st.session_state.flight_alt else "orange"
+                    folium.Polygon([[c[1], c[0]] for c in coords_wgs], color=color, weight=2,
+                                  fill=True, fill_color=color, fill_opacity=0.4,
+                                  popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m").add_to(m)
+            a_wgs = gcj02_to_wgs84(a[0], a[1])
+            b_wgs = gcj02_to_wgs84(b[0], b[1])
+            folium.Marker([a_wgs[1], a_wgs[0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
+            folium.Marker([b_wgs[1], b_wgs[0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
             if st.session_state.plan_path:
                 path_wgs = [gcj02_to_wgs84(p[0], p[1]) for p in st.session_state.plan_path]
-                add_flight_path(m, path_wgs, color="#00e5ff", weight=3)
-            
-            # 添加航点
+                folium.PolyLine([[p[1], p[0]] for p in path_wgs], color='green', weight=4).add_to(m)
             if st.session_state.waypoints:
                 for i, wp in enumerate(st.session_state.waypoints):
                     wp_wgs = gcj02_to_wgs84(wp[0], wp[1])
-                    is_reached = i < reached_wp
-                    is_current = i == reached_wp
-                    add_waypoint_marker(m, wp_wgs, i+1, is_current, is_reached)
-            
-            # 添加飞行轨迹
+                    folium.CircleMarker([wp_wgs[1], wp_wgs[0]], radius=4, color='blue', fill=True, popup=f"航点{i+1}").add_to(m)
             if st.session_state.flight_trail:
-                trail_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in st.session_state.flight_trail[-200:]]
-                add_trail(m, trail_wgs, color="#FF6B00", weight=2)
-            
-            # 添加无人机
-            heading = 0
-            if st.session_state.sim.current_wp_idx < len(st.session_state.sim.waypoints):
-                target = st.session_state.sim.waypoints[st.session_state.sim.current_wp_idx]
-                dx = target[0] - st.session_state.sim.current_pos[0]
-                dy = target[1] - st.session_state.sim.current_pos[1]
-                if abs(dx) > 1e-10 or abs(dy) > 1e-10:
-                    heading = math.degrees(math.atan2(dx, dy)) % 360
-            
+                trail_wgs = [gcj02_to_wgs84(lng, lat) for lng, lat in st.session_state.flight_trail[-100:]]
+                folium.PolyLine([[lat, lng] for lng, lat in trail_wgs], color='orange', weight=2).add_to(m)
             drone_wgs = gcj02_to_wgs84(center[0], center[1])
-            add_drone_marker(m, drone_wgs, heading, st.session_state.flight_alt)
-            
+            folium.Marker([drone_wgs[1], drone_wgs[0]], icon=folium.Icon(color='blue')).add_to(m)
             folium_static(m, width=700, height=500)
-        
         st.markdown("---")
         st.subheader("📋 通信日志")
         if st.session_state.comm_logs:
             for log in st.session_state.comm_logs[:20]:
                 st.caption(f"[{log['time']}] {log['direction']}: {log['message']}")
-        
+        else:
+            st.info("暂无通信日志")
         st.markdown("---")
-        st.subheader("💓 心跳数据")
+        st.subheader("💓 心跳序号 vs 飞行时间 (正比例关系)")
         history = st.session_state.sim.history
         if len(history) >= 2:
             times = [h.flight_time for h in history]
             seqs = [h.seq for h in history]
-            fig, ax = plt.subplots(figsize=(8,3))
-            ax.plot(times, seqs, marker='o', markersize=3, linewidth=1, color='#00e5ff')
+            fig, ax = plt.subplots(figsize=(8,4))
+            ax.plot(times, seqs, marker='o', markersize=4, linewidth=2)
             ax.set_xlabel('飞行时间 (秒)')
-            ax.set_ylabel('心跳序号')
-            ax.set_facecolor('#1a1a2e')
-            ax.grid(True, alpha=0.3)
-            fig.patch.set_facecolor('#1a1a2e')
+            ax.set_ylabel('心跳包序号')
+            ax.set_title('心跳序号与飞行时间关系（正比例）')
+            ax.grid(True)
             st.pyplot(fig)
             plt.close(fig)
+        else:
+            st.info(f"等待更多心跳数据... (当前 {len(history)} 个)")
+        st.subheader("📈 实时趋势")
+        if len(st.session_state.hb_list) > 1:
+            df = pd.DataFrame([{"时间": i, "高度": h.altitude} for i, h in enumerate(st.session_state.hb_list[:50])])
+            st.line_chart(df, x="时间", y="高度")
+        else:
+            st.info("等待更多数据...")
+        
+        # MAVLink解析面板已在侧边栏显示，这里不再重复
 
 if __name__ == "__main__":
     main()
